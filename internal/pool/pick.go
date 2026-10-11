@@ -56,6 +56,9 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	floorBlocked := func(e *entry) bool { return p.floorBlockedForRealmModel(e, reqModel, realm, now) }
 	var cands []*entry
 	for uid, e := range p.byUID {
+		if !p.routeOK(uid) {
+			continue
+		}
 		if tried != nil && tried[uid] {
 			continue
 		}
@@ -298,6 +301,9 @@ func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time
 func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm, model string) *auth.Auth {
 	var best *entry
 	for uid, e := range p.byUID {
+		if !p.routeOK(uid) {
+			continue
+		}
 		if tried != nil && tried[uid] {
 			continue
 		}

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/egress"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
@@ -117,7 +118,8 @@ type Handler struct {
 	degrade degradeGate
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
-	wafIP wafIPGate
+	wafIP     wafIPGate
+	wafRoutes routeWAFGates
 }
 
 // NewHandler 构建 handler。
@@ -372,8 +374,8 @@ func (h *Handler) modelList() []map[string]any {
 		// 写 model.json 供下次命中）→ 1M 兜底 / max_output_tokens 省略。
 		// 上游零值不再透出假 131072（误导 Codex/ZCode 等按 context_length 提前
 		// 截断、白白丢上下文）。
-		entry["context_length"] = upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, h.cfg.Upstream.HTTP)
-		if mo, ok := upstream.MaxOutputTokensListingV4(mi.ID, mi.MaxTokens, h.cfg.Upstream.HTTP); ok {
+		entry["context_length"] = upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, h.cfg.Upstream.PublicClient())
+		if mo, ok := upstream.MaxOutputTokensListingV4(mi.ID, mi.MaxTokens, h.cfg.Upstream.PublicClient()); ok {
 			entry["max_output_tokens"] = mo
 		}
 		// 上游模型对象全字段透出（name/描述/标签/倍率/能力旗标等，空值省略）。
@@ -415,8 +417,8 @@ func (h *Handler) modelList() []map[string]any {
 				entry = applyModelInfoFields(entry, mi)
 				remoteCtx, remoteOut = mi.ContextWindow, mi.MaxTokens
 			}
-			entry["context_length"] = upstream.ContextWindowListingV4(id, remoteCtx, h.cfg.Upstream.HTTP)
-			if mo, ok := upstream.MaxOutputTokensListingV4(id, remoteOut, h.cfg.Upstream.HTTP); ok {
+			entry["context_length"] = upstream.ContextWindowListingV4(id, remoteCtx, h.cfg.Upstream.PublicClient())
+			if mo, ok := upstream.MaxOutputTokensListingV4(id, remoteOut, h.cfg.Upstream.PublicClient()); ok {
 				entry["max_output_tokens"] = mo
 			}
 			if efforts, def := upstream.EffortListing("global", id, globalEfforts[id], globalDefaults[id]); efforts != nil {
@@ -556,6 +558,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	sessKey := session.ExtractKey(body)
 	stickyUID := ""
 	if h.cfg.Session != nil && sessKey != "" {
+		if m := h.cfg.Upstream.Egress; m != nil {
+			if uid, ok := h.cfg.Session.Peek(sessKey); ok {
+				route := m.Status(uid)
+				if route.State != "direct" && route.State != "ready" {
+					h.cfg.Session.Unbind(sessKey)
+					code := "proxy_unavailable"
+					if route.State == "waf_blocked" {
+						code = "proxy_waf_blocked"
+					}
+					ee := &egress.EgressError{Code: code, SlotID: route.SlotID, Generation: route.Generation, Stage: "sticky", RetryAfter: route.RetryAfter}
+					stopEgress(w, ee)
+					st.status = egress.HTTPStatus(ee)
+					return
+				}
+			}
+		}
 		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
 		// 而不是钉在限额号上反复失败（"限额后换不动号"的正解）。
 		if uid, ok := h.cfg.Session.ResolveForModel(sessKey, peek.Model); ok {
@@ -741,6 +759,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
 		}
 		if acct == nil {
+			if m := h.cfg.Upstream.Egress; m != nil {
+				for _, account := range h.cfg.Pool.List() {
+					if realm != "" && account.Realm != realm {
+						continue
+					}
+					route := m.Status(account.UID)
+					if route.State == "direct" || route.State == "ready" {
+						continue
+					}
+					code := "proxy_unavailable"
+					if route.State == "waf_blocked" {
+						code = "proxy_waf_blocked"
+					}
+					ee := &egress.EgressError{Code: code, SlotID: route.SlotID, Generation: route.Generation, Stage: "selection", RetryAfter: route.RetryAfter}
+					stopEgress(w, ee)
+					st.status = egress.HTTPStatus(ee)
+					return
+				}
+			}
 			st.status = http.StatusServiceUnavailable
 			// 记下"是不是模型级阻塞"。选号返回 nil 有两种完全不同的成因：
 			//   (a) 池子真的没有可用号（账号级冷却/在途占满/积分保底）；
@@ -774,6 +811,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
 			if err := h.cfg.Upstream.RefreshToken(acct); err != nil {
 				lastErr = err
+				if stopEgress(w, err) {
+					releaseHeld()
+					st.status = egress.HTTPStatus(err)
+					return
+				}
 				var ue *upstream.Error
 				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
 					h.cfg.Pool.Disable(acct.UID, "refresh session dead")
@@ -803,6 +845,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = uerr.Status
 		}
 		if uerr == nil && terr != nil {
+			if stopEgress(w, terr) {
+				releaseHeld()
+				st.status = egress.HTTPStatus(terr)
+				return
+			}
 			// 上游超时 / 停滞：**不换号、不罚号**。
 			//
 			// 超时不是账号的问题：同一份请求换到别的号，撞上的是同一个慢上游，
@@ -935,8 +982,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 该次 WAF 403 喂入 IP 级状态机，若激活（短窗多号命中，IP 被拦而非账号）
 			// 则立即终止轮转——继续换号只会把请求放大 MaxRotate 倍打同一出口 IP，
 			// 加重风控。账号级软冷却已在上方 applyErrorPolicy 照常记账。
-			if kind == upstream.ErrWafBlock && h.wafIP.noteWaf(acct.UID) {
-				break
+			if kind == upstream.ErrWafBlock {
+				if m := h.cfg.Upstream.Egress; m != nil {
+					key := uerr.RouteKey
+					if key != "" {
+						if until, blocked := h.wafRoutes.note(key, acct.UID); blocked {
+							m.BlockWAF(key, until)
+							ee := &egress.EgressError{Code: "proxy_waf_blocked", Stage: "waf", RetryAfter: int(time.Until(until).Seconds()) + 1}
+							stopEgress(w, ee)
+							st.status = egress.HTTPStatus(ee)
+							return
+						}
+					}
+				} else if h.wafIP.noteWaf(acct.UID) {
+					break
+				}
 			}
 			if !rotateBackoff(i, r.Context()) {
 				break // ctx 取消：终止轮转（分类错误换号退避）

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/egress"
 )
 
 // reportPath 活跃上报通道（实测）。
@@ -38,7 +39,7 @@ func (c *Client) billingJSON(a *auth.Auth, method, path string, body any) (json.
 		return nil, err
 	}
 	c.BillingHeaders(req, a)
-	return c.doJSON(req)
+	return c.doJSON(req, a)
 }
 
 // billingMeterJSON 仅对 /billing/meter 族端点（get-user-resource / daily-checkin）
@@ -73,6 +74,10 @@ func isTransientBillingErr(err error) bool {
 	if err == nil {
 		return false
 	}
+	var ee *egress.EgressError
+	if errors.As(err, &ee) {
+		return false
+	}
 	var ue *Error
 	if errors.As(err, &ue) {
 		return ue.Kind == ErrServer
@@ -85,7 +90,7 @@ func isTransientBillingErr(err error) bool {
 // 不用本策略——它有自己的换号轮转语义，重试会放大在途请求。
 func (c *Client) retryBillingTransient(fn func() error) error {
 	err := fn()
-	if err == nil || !isTransientBillingErr(err) {
+	if err == nil || c.Egress != nil || !isTransientBillingErr(err) {
 		return err
 	}
 	for i := 1; i <= 2; i++ {

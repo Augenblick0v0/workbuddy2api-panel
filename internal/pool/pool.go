@@ -12,6 +12,8 @@ import (
 )
 
 type Pool struct {
+	routeAvailable func(string) bool // memory-only callback; never calls Pool
+
 	mu      sync.RWMutex
 	byUID   map[string]*entry
 	stateFp string
@@ -283,7 +285,7 @@ func (p *Pool) SetStore(s StoreSnapshotter) {
 func (p *Pool) Acquire(uid string) bool {
 	p.mu.RLock()
 	e, ok := p.byUID[uid]
-	if !ok {
+	if !ok || !p.routeOK(uid) {
 		p.mu.RUnlock()
 		return false
 	}
@@ -388,3 +390,11 @@ func (p *Pool) upsertLocked(a *auth.Auth) {
 }
 
 // Pick 返回 healthy 中积分最高的账号；无可用返回 nil。
+
+// SetRouteAvailable installs a memory-only route predicate independently of account state.
+func (p *Pool) SetRouteAvailable(fn func(string) bool) {
+	p.mu.Lock()
+	p.routeAvailable = fn
+	p.mu.Unlock()
+}
+func (p *Pool) routeOK(uid string) bool { return p.routeAvailable == nil || p.routeAvailable(uid) }

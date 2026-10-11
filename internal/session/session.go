@@ -137,6 +137,19 @@ func (r *Router) Resolve(key string) (string, bool) {
 	return r.ResolveForModel(key, "")
 }
 
+// Peek reads an unexpired existing binding without touching its TTL or assigning
+// a replacement. The handler uses it to distinguish a blocked fixed route from
+// ordinary account/model cooldown before ResolveForModel can reassign.
+func (r *Router) Peek(key string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	e, ok := r.entries[key]
+	if !ok || expired(e, time.Now(), r.cfg.TTL) {
+		return "", false
+	}
+	return e.uid, true
+}
+
 // ResolveForModel 返回会话 key 在该模型上应绑定的账号 uid。
 // 命中且账号在该模型可用 → 滚动 lastActive 并直接返回；否则（绑定号已冷却/占满/
 // 被该模型限流）走重新分配。

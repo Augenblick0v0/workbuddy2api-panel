@@ -337,7 +337,7 @@ func (p *Pool) AvailableUIDs() []string {
 	now := time.Now()
 	uids := make([]string, 0, len(p.byUID))
 	for uid, e := range p.byUID {
-		if !e.healthy(now) {
+		if !p.routeOK(uid) || !e.healthy(now) {
 			continue
 		}
 		if p.inFlightFull(e) {
@@ -358,7 +358,7 @@ func (p *Pool) AvailableUIDsForModel(model string) []string {
 	now := time.Now()
 	uids := make([]string, 0, len(p.byUID))
 	for uid, e := range p.byUID {
-		if !e.healthyForModel(now, model) {
+		if !p.routeOK(uid) || !e.healthyForModel(now, model) {
 			continue
 		}
 		if p.inFlightFull(e) {
@@ -382,7 +382,7 @@ func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
 		return nil
 	}
 	now := time.Now()
-	if !e.healthyForModel(now, model) {
+	if !p.routeOK(uid) || !e.healthyForModel(now, model) {
 		return nil
 	}
 	// 积分保底（粘性路径）：与 pick 的 floorBlocked 同判据——触底 + 收费即拦
@@ -415,7 +415,7 @@ func (p *Pool) PickByUID(uid string) *auth.Auth {
 		return nil
 	}
 	now := time.Now()
-	if !e.healthy(now) {
+	if !p.routeOK(uid) || !e.healthy(now) {
 		return nil
 	}
 	if p.inFlightFull(e) {
@@ -478,7 +478,7 @@ func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, di
 			// 暂停选号：退出选号候选，但照常签到 / 活跃上报 / 保活 / 刷新余额。
 			// 它与「禁用」是两种运维状态，这里分开计；要不要合并由调用方决定。
 			paused++
-		case !e.healthy(now):
+		case !p.routeOK(e.a.UID) || !e.healthy(now):
 			cooling++
 		default:
 			healthy++
@@ -509,7 +509,7 @@ func (p *Pool) ServableForRealm(realm string) bool {
 		if realm != "" && e.a.Realm() != realm {
 			continue
 		}
-		if p.inFlightFull(e) {
+		if !p.routeOK(e.a.UID) || p.inFlightFull(e) {
 			continue
 		}
 		// 存在性语义：账号级 healthy，或处于模型级豁免形态（6004 单模型软冷却——
