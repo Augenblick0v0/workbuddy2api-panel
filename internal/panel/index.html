@@ -605,6 +605,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .proxy-card-body { padding: 14px; }
 .proxy-endpoint { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; margin-bottom: 6px; }
 .proxy-probe { margin: 14px 0; min-height: 42px; }
+.proxy-probe-row { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 8px; margin: 6px 0; }
+.proxy-probe .hint { overflow-wrap: anywhere; }
 .proxy-actions { display: flex; flex-wrap: wrap; gap: 7px; }
 .proxy-binding { display: grid; grid-template-columns: minmax(130px,1fr) minmax(150px,1fr) minmax(230px,1.3fr); gap: 14px; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--line-soft); }
 .proxy-binding:last-child { border-bottom: 0; }
@@ -1322,7 +1324,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <p class="hint proxy-editor-version" id="proxyEditorVersion"></p>
         <label class="fld"><span class="lb">名称</span><input name="name" maxlength="128" placeholder="例如：固定出口 A" required></label>
         <div class="grid2">
-          <label class="fld"><span class="lb">协议</span><select name="scheme"><option value="http">HTTP</option><option value="https">HTTPS（验证代理证书）</option></select></label>
+          <label class="fld"><span class="lb">协议</span><select name="scheme"><option value="http">HTTP</option><option value="https">HTTPS（验证代理证书）</option><option value="socks5">SOCKS5（代理端 DNS）</option><option value="socks5h">SOCKS5H（代理端 DNS）</option></select></label>
           <label class="fld"><span class="lb">端口</span><input name="port" type="number" min="1" max="65535" required></label>
         </div>
         <label class="fld"><span class="lb">主机（不含协议、路径或认证）</span><input name="host" placeholder="proxy.example.com" required></label>
@@ -1331,7 +1333,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <label class="fld"><span class="lb">新密码（可选）</span><input name="password" type="password" autocomplete="new-password" maxlength="4096" placeholder="留空保持原密码"></label>
         </div>
         <div class="proxy-form-row"><label><input name="enabled" type="checkbox" checked> 启用此槽</label><label><input name="clear_password" type="checkbox"> 明确清除已有密码</label></div>
-        <p class="hint">仅支持 HTTP / HTTPS。私网范围需服务端显式允许；元数据地址始终拒绝。请通过 HTTPS 或受控管理网络传输代理凭据。</p>
+        <p class="hint">SOCKS5 / SOCKS5H 均使用代理端 DNS，需填写真实 SOCKS5 服务入口；切换协议不会将 HTTP 端口转换为 SOCKS5。SOCKS 用户名与密码各最多 255 字节（由服务端校验），有密码时需填写用户名。</p>
+        <p class="hint">HTTP 出口 IP 获取与 HTTPS 通道分别检测；仅 HTTP 成功不代表业务可用。私网范围需服务端显式允许；元数据地址始终拒绝。请通过 HTTPS 或受控管理网络传输代理凭据。</p>
         <div class="proxy-editor-error" id="proxyEditorError" role="alert"></div>
       </div>
       <footer><button type="button" id="btnProxyEditorReload">载入最新版本</button><span class="grow"></span><button type="button" id="btnProxyClose">取消</button><button type="submit" class="primary" id="btnProxySave">保存代理槽</button></footer>

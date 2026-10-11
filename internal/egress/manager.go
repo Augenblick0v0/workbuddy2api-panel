@@ -23,10 +23,24 @@ func (m *Manager) releaseRef(key string, caller bool) {
 	}
 }
 func (m *Manager) routeKeyLocked(c *Config, id string, g uint64) string {
-	if p, ok := c.ProbeResults[id]; ok && p.Generation == g && p.IP != "" {
-		return "ip:" + p.IP
+	if p, ok := c.ProbeResults[id]; ok && p.Generation == g {
+		if ip := routeIP(p); ip != "" {
+			return "ip:" + ip
+		}
 	}
 	return transportKey(id, g)
+}
+
+// Plaintext HTTP observations are display-only. Only successful HTTPS evidence
+// (or a pre-upgrade successful probe) may identify a shared WAF exit bucket.
+func routeIP(p ProbeResult) string {
+	if p.VerifiedIP != "" {
+		return p.VerifiedIP
+	}
+	if p.HTTPSStatus == "" && (p.Status == "ok" || !p.SuccessfulAt.IsZero()) {
+		return p.IP
+	}
+	return ""
 }
 
 // CanonicalRouteKey promotes an unresolved route to its subsequently learned

@@ -65,7 +65,7 @@ func (m *Manager) makeTransport(slot Slot) *http.Transport {
 	}
 	tr.DialTLS = nil
 	tr.DialTLSContext = nil
-	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialProxy := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, e := net.SplitHostPort(addr)
 		if e != nil {
 			return nil, &proxyDialError{e}
@@ -100,12 +100,19 @@ func (m *Manager) makeTransport(slot Slot) *http.Transport {
 		}
 		return nil, &proxyDialError{last}
 	}
+	tr.DialContext = dialProxy
+	if slot.Scheme == "socks5" || slot.Scheme == "socks5h" {
+		tr.Proxy = nil
+		tr.DialContext = func(ctx context.Context, network, target string) (net.Conn, error) {
+			return socksConnect(ctx, network, target, slot, dialProxy)
+		}
+	}
 	tr.OnProxyConnectResponse = func(ctx context.Context, p *url.URL, req *http.Request, res *http.Response) error {
 		if res.StatusCode == http.StatusProxyAuthRequired {
-			return &EgressError{Code: "proxy_auth_failed", SlotID: slot.ID, Generation: slot.TransportGeneration, Stage: "connect"}
+			return &EgressError{Code: "proxy_auth_failed", SlotID: slot.ID, Generation: slot.TransportGeneration, Stage: "connect", ProxyStatus: res.StatusCode, Reason: "authentication_rejected"}
 		}
 		if res.StatusCode != http.StatusOK {
-			return &EgressError{Code: "proxy_connect_failed", SlotID: slot.ID, Generation: slot.TransportGeneration, Stage: "connect"}
+			return &EgressError{Code: "proxy_connect_failed", SlotID: slot.ID, Generation: slot.TransportGeneration, Stage: "connect", ProxyStatus: res.StatusCode, Reason: "connect_rejected"}
 		}
 		return nil
 	}
@@ -163,24 +170,39 @@ func (m *Manager) RoundTrip(req *http.Request) (_ *http.Response, returnedErr er
 	}
 	g.refs++
 	tr := g.transport
+	slot := c.Slots[h.SlotID]
 	m.mu.Unlock()
-	var sent atomic.Bool
-	trace := &httptrace.ClientTrace{WroteHeaders: func() { sent.Store(true) }}
-	r := req.Clone(httptrace.WithClientTrace(req.Context(), trace))
+	var sent, upstreamStarted atomic.Bool
+	trace := &httptrace.ClientTrace{
+		WroteHeaders:      func() { sent.Store(true) },
+		GotConn:           func(httptrace.GotConnInfo) { upstreamStarted.Store(true) },
+		TLSHandshakeStart: func() { upstreamStarted.Store(true) },
+	}
+	dialCtx := context.WithValue(req.Context(), requestDialContextKey{}, req.Context())
+	r := req.Clone(httptrace.WithClientTrace(dialCtx, trace))
 	r.Header = req.Header.Clone()
 	r.Header.Del("Proxy-Authorization")
 	resp, err := tr.RoundTrip(r)
 	if err == nil && h.SlotID != "" && resp.StatusCode == http.StatusProxyAuthRequired {
 		resp.Body.Close()
 		resp = nil
-		err = &EgressError{Code: "proxy_auth_failed", SlotID: h.SlotID, Generation: h.Generation, Stage: "proxy_response"}
+		err = &EgressError{Code: "proxy_auth_failed", SlotID: h.SlotID, Generation: h.Generation, Stage: "proxy_response", ProxyStatus: http.StatusProxyAuthRequired, Reason: "authentication_rejected"}
 	}
 	if err != nil {
 		m.releaseRef(h.transportKey, false)
+		if errors.Is(req.Context().Err(), context.Canceled) {
+			// A caller cancellation is not evidence that the proxy is broken.
+			return nil, &EgressError{Code: "upstream_transport_failed", SlotID: h.SlotID, Generation: h.Generation, Stage: "canceled", Reason: "request_canceled", Sent: sent.Load()}
+		}
 		var ee *EgressError
 		if errors.As(err, &ee) {
 			m.markUnavailable(h)
 			return nil, ee
+		}
+		if (slot.Scheme == "socks5" || slot.Scheme == "socks5h") &&
+			!upstreamStarted.Load() && errors.Is(req.Context().Err(), context.DeadlineExceeded) {
+			m.markUnavailable(h)
+			return nil, &EgressError{Code: "proxy_timeout", SlotID: h.SlotID, Generation: h.Generation, Stage: "socks_handshake", Reason: "deadline", Sent: sent.Load()}
 		}
 		var de *proxyDialError
 		if h.SlotID != "" && (errors.As(err, &de) || strings.Contains(err.Error(), "proxyconnect")) {

@@ -11,7 +11,54 @@ import (
 	"time"
 )
 
-const defaultProbeURL = "https://api.ipify.org?format=json"
+const defaultProbeURL = "http://api.ipify.org?format=json"
+const defaultProbeHTTPSURL = "https://api.ipify.org?format=json"
+
+// probeIP only sends credential-free requests to an internally chosen target.
+// Its timeout is separate from the overall probe budget, so an HTTP-only failure
+// cannot consume the whole budget before the HTTPS check.
+func (m *Manager) probeIP(ctx context.Context, target string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return "", &EgressError{Code: "proxy_probe_failed", Stage: "probe_request"}
+	}
+	client := &http.Client{Transport: m, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	res, err := client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", &EgressError{Code: "proxy_timeout", Stage: "probe", Reason: "deadline"}
+		}
+		return "", err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return "", &EgressError{Code: "proxy_probe_failed", Stage: "probe_status", Reason: "target_http_status"}
+	}
+	raw, err := io.ReadAll(io.LimitReader(res.Body, (16<<10)+1))
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", &EgressError{Code: "proxy_timeout", Stage: "probe_body", Reason: "deadline"}
+		}
+		return "", &EgressError{Code: "proxy_probe_failed", Stage: "probe_body"}
+	}
+	if len(raw) > 16<<10 {
+		return "", &EgressError{Code: "proxy_probe_failed", Stage: "probe_size"}
+	}
+	ip := strings.TrimSpace(string(raw))
+	var obj struct {
+		IP string `json:"ip"`
+	}
+	if json.Unmarshal(raw, &obj) == nil && obj.IP != "" {
+		ip = obj.IP
+	}
+	parsed := net.ParseIP(strings.TrimSpace(ip))
+	if parsed == nil {
+		return "", &EgressError{Code: "proxy_probe_failed", Stage: "probe_ip"}
+	}
+	return parsed.String(), nil
+}
 
 // Probe is intentionally a credential-free, fixed-target GET; callers cannot
 // provide a URL, headers, token, redirect policy, timeout, or response limit.
@@ -27,45 +74,36 @@ func (m *Manager) Probe(ctx context.Context, id string) (ProbeResult, error) {
 	defer cancel()
 	ctx = context.WithValue(WithRoute(ctx, h), probeContextKey{}, true)
 	target := m.opts.ProbeURL
+	secureTarget := m.opts.ProbeHTTPSURL
 	if target == "" {
 		target = defaultProbeURL
+		if secureTarget == "" {
+			secureTarget = defaultProbeHTTPSURL
+		}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	start := time.Now()
 	result := ProbeResult{SlotID: id, Generation: h.Generation, CheckedAt: start.UTC(), Status: "error"}
+	result.IP, err = m.probeIP(ctx, target)
+	result.IPStatus = "error"
 	if err == nil {
-		client := &http.Client{Transport: m, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-		var res *http.Response
-		res, err = client.Do(req)
+		result.IPStatus = "ok"
+		result.IPCheckedAt = result.CheckedAt
+	}
+	if secureTarget != "" {
+		var secureIP string
+		secureIP, err = m.probeIP(ctx, secureTarget)
+		result.HTTPSStatus = "error"
 		if err == nil {
-			defer res.Body.Close()
-			if res.StatusCode != http.StatusOK {
-				err = &EgressError{Code: "proxy_probe_failed", SlotID: id, Generation: h.Generation, Stage: "probe_status"}
-			} else {
-				var raw []byte
-				raw, err = io.ReadAll(io.LimitReader(res.Body, (16<<10)+1))
-				if err == nil && len(raw) > 16<<10 {
-					err = &EgressError{Code: "proxy_probe_failed", Stage: "probe_size"}
-				}
-				if err == nil {
-					ip := strings.TrimSpace(string(raw))
-					var obj struct {
-						IP string `json:"ip"`
-					}
-					if json.Unmarshal(raw, &obj) == nil && obj.IP != "" {
-						ip = obj.IP
-					}
-					parsed := net.ParseIP(strings.TrimSpace(ip))
-					if parsed == nil {
-						err = &EgressError{Code: "proxy_probe_failed", Stage: "probe_ip"}
-					} else {
-						result.IP = parsed.String()
-						result.Status = "ok"
-						result.SuccessfulAt = result.CheckedAt
-					}
-				}
-			}
+			result.HTTPSStatus = "ok"
+			result.IPStatus = "ok"
+			result.IP = secureIP
+			result.IPCheckedAt = result.CheckedAt
 		}
+	}
+	if err == nil {
+		result.Status = "ok"
+		result.SuccessfulAt = result.CheckedAt
+		result.VerifiedIP = result.IP
 	}
 	result.LatencyMS = time.Since(start).Milliseconds()
 	if err != nil {
@@ -73,6 +111,9 @@ func (m *Manager) Probe(ctx context.Context, id string) (ProbeResult, error) {
 		var ee *EgressError
 		if errors.As(err, &ee) {
 			result.ErrorCode = ee.Code
+			result.ErrorStage = ee.Stage
+			result.ErrorReason = ee.Reason
+			result.ProxyStatus = ee.ProxyStatus
 		}
 		if ctx.Err() != nil {
 			result.ErrorCode = "proxy_timeout"
@@ -86,9 +127,15 @@ func (m *Manager) Probe(ctx context.Context, id string) (ProbeResult, error) {
 				return result, &EgressError{Code: "oauth_proxy_changed", SlotID: id, Generation: h.Generation, Stage: "probe_generation"}
 			}
 		}
-		if result.IP == "" {
-			if old, ok := snap.ProbeResults[id]; ok && old.Generation == h.Generation {
+		if old, ok := snap.ProbeResults[id]; ok && old.Generation == h.Generation {
+			if result.VerifiedIP == "" {
+				result.VerifiedIP = routeIP(old)
+			}
+			if result.IP == "" {
 				result.IP = old.IP
+				result.IPCheckedAt = old.IPCheckedAt
+			}
+			if result.SuccessfulAt.IsZero() {
 				result.SuccessfulAt = old.SuccessfulAt
 				if result.SuccessfulAt.IsZero() && old.Status == "ok" {
 					result.SuccessfulAt = old.CheckedAt
@@ -115,7 +162,8 @@ func (m *Manager) Probe(ctx context.Context, id string) (ProbeResult, error) {
 		break
 	}
 	if err != nil {
-		return result, &EgressError{Code: result.ErrorCode, SlotID: id, Generation: h.Generation, Stage: "probe"}
+		m.markUnavailable(h)
+		return result, &EgressError{Code: result.ErrorCode, SlotID: id, Generation: h.Generation, Stage: result.ErrorStage, Reason: result.ErrorReason, ProxyStatus: result.ProxyStatus}
 	}
 	m.mu.Lock()
 	delete(m.unavailable, h.transportKey)

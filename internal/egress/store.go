@@ -98,7 +98,7 @@ func validate(c Config) error {
 	}
 	for id, s := range c.Slots {
 		seq, e := strconv.ParseUint(strings.TrimPrefix(id, "slot-"), 10, 64)
-		if !strings.HasPrefix(id, "slot-") || e != nil || seq == 0 || seq >= c.NextSlotSeq || s.ID != id || s.TransportGeneration == 0 || s.Port < 1 || s.Port > 65535 || (s.Scheme != "http" && s.Scheme != "https") || strings.TrimSpace(s.Host) != s.Host || s.Host == "" || strings.ContainsAny(s.Host, "/@?#\\ \t\r\n") || strings.ContainsAny(s.Username+s.Password, "\r\n") {
+		if !strings.HasPrefix(id, "slot-") || e != nil || seq == 0 || seq >= c.NextSlotSeq || s.ID != id || s.TransportGeneration == 0 || s.Port < 1 || s.Port > 65535 || !ValidProtocol(s.Scheme, s.Username, s.Password) || strings.TrimSpace(s.Host) != s.Host || s.Host == "" || strings.ContainsAny(s.Host, "/@?#\\ \t\r\n") || strings.ContainsAny(s.Username+s.Password, "\r\n") {
 			return &EgressError{Code: "proxy_invalid_config", SlotID: id, Stage: "slot"}
 		}
 		if strings.Contains(s.Host, ":") && net.ParseIP(s.Host) == nil {

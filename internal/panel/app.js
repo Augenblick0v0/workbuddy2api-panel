@@ -1158,14 +1158,38 @@ function proxyProbeHTML(slot) {
   const p = slot.probe;
   if (!p) return '<span class="note">尚未检测 · 出口 IP 未知</span>';
   const time = parseAPITime(p.probed_at);
+  const ipTime = parseAPITime(p.ip_checked_at);
   const savedSuccess = parseAPITime(p.last_success_at);
   const success = savedSuccess > 0 ? savedSuccess : (p.status === 'ok' ? time : null);
-  const stale = p.status !== 'ok' || p.generation !== slot.transport_generation || !success || Date.now() - success > 15 * 60 * 1000;
-  return '<span class="tag ' + (p.status === 'ok' ? 'ok' : 'warn') + '">' + esc(p.ip || 'IP 未知') + '</span>' +
-    (p.status !== 'ok' ? '<span class="tag warn">' + esc(p.error_code || p.status) + '</span>' : '') +
-    '<div class="hint">上次成功：' + esc(success ? fmtLocalDateTime(success) : '尚无') +
+  const changed = p.generation != null && p.generation !== slot.transport_generation;
+  const expired = success > 0 && Date.now() - success > 15 * 60 * 1000;
+  // Legacy records lack stage fields; keep their success readable without
+  // inventing a current HTTP observation for a retained historical IP.
+  const ipOK = p.ip_status === 'ok' || (!p.ip_status && p.status === 'ok' && !!p.ip);
+  const httpsStatus = p.https_status || (p.status === 'ok' ? 'ok' : p.status === 'error' ? 'error' : 'unknown');
+  const httpsOK = httpsStatus === 'ok';
+  const httpOnly = ipOK && !httpsOK;
+  const stages = { connect: '代理连接', proxy_response: '代理响应', proxy_tls: '代理 TLS', upstream_tls: '目标 TLS', upstream: '目标连接', socks_handshake: 'SOCKS 握手', probe_request: '探针请求', probe: '探针请求', probe_status: '目标 HTTP 响应', probe_body: '读取探针响应', probe_size: '探针响应大小', probe_ip: '出口 IP 响应', canceled: '检测已取消' };
+  const reasons = { connect_rejected: '代理拒绝隧道', authentication_rejected: '代理认证失败', socks_handshake_failed: 'SOCKS 握手失败', socks_connect_rejected: 'SOCKS 拒绝连接', deadline: '检测超时', target_http_status: '目标 HTTP 状态异常', request_canceled: '请求已取消' };
+  const proxyStatus = Number.isInteger(p.proxy_status) && p.proxy_status >= 100 && p.proxy_status <= 599 ? p.proxy_status : null;
+  const failure = [
+    proxyStatus ? (p.error_stage === 'connect' ? 'CONNECT ' : '代理 HTTP ') + proxyStatus : stages[p.error_stage],
+    reasons[p.error_reason],
+    p.error_code,
+  ].filter(Boolean).map(esc).join(' · ');
+  return '<div class="proxy-probe-row"><span class="note">出口 IP</span><span class="tag ' + (ipOK ? 'ok' : 'warn') + '">' + esc(p.ip || 'IP 未知') + '</span>' +
+    (httpOnly ? '<span class="hint">HTTP 观测 · 未验证 HTTPS</span>' : (!ipOK && p.ip ? '<span class="hint">历史观测</span>' : '')) + '</div>' +
+    '<div class="proxy-probe-row"><span class="note">HTTPS 检测</span><span class="tag ' + (httpsOK ? 'ok' : 'warn') + '">' +
+    (httpsOK ? '通过' : httpsStatus === 'error' ? '失败' : '尚未完成') + '</span>' +
+    (!httpsOK && failure ? '<span class="hint">' + failure + '</span>' : '') + '</div>' +
+    (httpOnly ? '<div class="hint">仅获取 HTTP 出口信息；HTTPS 未通过，账号出站仍停止，不回退直连。</div>' : '') +
+    (httpsOK ? '<div class="hint">仅固定 HTTPS 探针通过，不代表账号登录或业务验证成功。</div>' : '') +
+    (ipTime > 0 ? '<div class="hint">IP 观测：' + esc(fmtLocalDateTime(ipTime)) + '</div>' : '') +
+    '<div class="hint">上次成功（全检测）：' + esc(success ? fmtLocalDateTime(success) : '尚无') +
     ' · 最近尝试：' + esc(time ? fmtLocalDateTime(time) : '时间未知') + ' · ' + esc(p.latency_ms || 0) + ' ms' +
-    (stale ? ' · 结果已过期 / 代际已变，请重测' : '') + '</div>';
+    '</div>' +
+    (changed ? '<div class="hint">代际已变：此结果来自旧配置，请重新检测。</div>' : '') +
+    (expired ? '<div class="hint">成功结果已过期（超过 15 分钟），请重新检测。</div>' : '');
 }
 function proxyOptions(selected, includeUnassigned) {
   return (includeUnassigned ? '<option value="__unassigned"' + (selected === '__unassigned' ? ' selected' : '') + '>未绑定 · 默认直连（保持）</option>' : '') +
@@ -1210,7 +1234,7 @@ function renderProxySlots() {
     '<div class="proxy-actions"><button class="xs" data-p="edit" data-id="' + esc(slot.id) + '">编辑</button>' +
     '<button class="xs" data-p="toggle" data-id="' + esc(slot.id) + '">' + (slot.enabled ? '停用' : '启用') + '</button>' +
     '<button class="xs" data-p="probe" data-id="' + esc(slot.id) + '"' + (!slot.enabled ? ' disabled' : '') + '>检测出口</button>' +
-    '<button class="xs danger" data-p="delete" data-id="' + esc(slot.id) + '">删除</button></div></div></article>').join('') : '<div class="empty">暂无代理槽。添加 HTTP / HTTPS 代理后，再为账号固定绑定。</div>';
+    '<button class="xs danger" data-p="delete" data-id="' + esc(slot.id) + '">删除</button></div></div></article>').join('') : '<div class="empty">暂无代理槽。添加 HTTP / HTTPS / SOCKS5 代理后，再为账号固定绑定。</div>';
 }
 function renderProxyBindings() {
   if (proxyBindingDirty.size) {

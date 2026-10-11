@@ -47,9 +47,10 @@
 
 ### 账号固定出站代理（开发候选）
 
-新增 HTTP/HTTPS 代理槽、固定账号绑定、服务端 OAuth 固定出口和故障停止。
+新增 HTTP/HTTPS/SOCKS5/SOCKS5H 代理槽、固定账号绑定、服务端 OAuth 固定出口和故障停止。
 代理故障不直连；旧数据/冷却/用量保持独立。使用与回滚边界见
 [账号代理说明](docs/account-proxy.md)，验证状态见[开发证据](docs/proxy-acceptance.md)。
+HTTP 出口 IP 与 HTTPS 可用性分别诊断；SOCKS 增量验收见[诊断与 SOCKS 证据](docs/proxy-socks-acceptance.md)。
 独立 CLI/脚本不继承绑定，绑定后请通过常驻 Panel 服务维护。
 2026-10-11 已获批准发布正式生产；代理配置初始为空，既有账号出口和数据保持原样。
 

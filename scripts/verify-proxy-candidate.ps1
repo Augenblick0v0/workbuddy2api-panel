@@ -1,4 +1,7 @@
-param([string]$Image='workbuddy2api-panel:account-proxy-candidate')
+param(
+  [string]$Image='workbuddy2api-panel:account-proxy-candidate',
+  [ValidateSet('http','socks5','socks5h')][string]$Scheme='http'
+)
 $ErrorActionPreference='Stop'
 $repo=Split-Path -Parent $PSScriptRoot
 $id=([guid]::NewGuid().ToString('N')).Substring(0,8)
@@ -27,9 +30,20 @@ try {
   }
   WriteJSON 'config.json' $cfg
   WriteJSON 'auth.json' @{auth=@{accessToken='synthetic-initial';refreshToken='synthetic-refresh';expiresAt=[DateTimeOffset]::UtcNow.AddHours(2).ToUnixTimeSeconds();realm='global';domain='synthetic.workbuddy.ai'};account=@{uid='candidate-global';nickname='candidate fixture';enterpriseId='fixture-enterprise'}}
-  WriteJSON 'proxies.json' @{schema_version=1;revision=1;next_slot_seq=2;slots=@{'slot-1'=@{id='slot-1';name='candidate local proxy';enabled=$true;scheme='http';host='proxy-fixture';port=18888;transport_generation=1}};bindings=@{'candidate-global'='slot-1'};probe_results=@{}}
+  $slot=@{id='slot-1';name='candidate local proxy';enabled=$true;scheme=$Scheme;host='proxy-fixture';port=18888;transport_generation=1}
+  if($Scheme -ne 'http'){
+    $slot.port=18890
+    $slot.username='synthetic-socks-user'
+    $slot.password='synthetic-socks-password'
+  }
+  WriteJSON 'proxies.json' @{schema_version=1;revision=1;next_slot_seq=2;slots=@{'slot-1'=$slot};bindings=@{'candidate-global'='slot-1'};probe_results=@{}}
   DockerOK -ArgsList @('run','--rm','-v',"$($volume):/fixtures",'-v',"$($inputDir):/input:ro",'alpine:3.20','sh','-c','mkdir -p /fixtures/auths /fixtures/data; cp /input/config.json /fixtures/config.json; cp /input/auth.json /fixtures/auths/workbuddy-candidate-global.json; cp /input/proxies.json /fixtures/data/proxies.json; chmod 600 /fixtures/config.json /fixtures/auths/*.json /fixtures/data/*.json; chown -R 10001:10001 /fixtures')|Out-Null
-  DockerOK -ArgsList @('run','-d','--name',$fixture,'--network',$network,'--network-alias','proxy-fixture','--network-alias','direct-counter','-v',"$($repo):/src:ro",'python:3.12-slim','python','/src/scripts/proxy_candidate_fixture.py')|Out-Null
+  $fixtureArgs=@('run','-d','--name',$fixture,'--network',$network,'--network-alias','proxy-fixture','--network-alias','direct-counter','-v',"$($repo):/src:ro")
+  if($Scheme -ne 'http'){
+    $fixtureArgs+=@('-e','FIXTURE_SOCKS_USER=synthetic-socks-user','-e','FIXTURE_SOCKS_PASSWORD=synthetic-socks-password')
+  }
+  $fixtureArgs+=@('python:3.12-slim','python','/src/scripts/proxy_candidate_fixture.py')
+  DockerOK -ArgsList $fixtureArgs|Out-Null
   DockerOK -ArgsList @('run','-d','--name',$candidate,'--network',$network,'-p','127.0.0.1::7863','-v',"$($volume):/fixtures",$Image,'-config','/fixtures/config.json')|Out-Null
   $inspect=(DockerOK -ArgsList @('inspect',$candidate)|ConvertFrom-Json)[0]
   $port=$inspect.NetworkSettings.Ports.'7863/tcp'[0].HostPort
@@ -75,9 +89,10 @@ try {
   if($failed.StatusCode -lt 500 -or "$failureBody" -notmatch 'proxy_|upstream_transport_failed|upstream_timeout'){throw 'proxy interruption did not stop request'}
   $counts=DockerOK -ArgsList @('exec',$fixture,'python','-c','import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:18889/fixture/counts").read().decode())')|ConvertFrom-Json
   if($counts.direct -ne 0){throw "candidate leaked $($counts.direct) direct requests"}
+  if($Scheme -ne 'http' -and $counts.socks -lt 1){throw 'candidate did not use the SOCKS fixture'}
   $overview=Invoke-RestMethod "$base/panel/api/overview" -Headers $headers
   if($overview.accounts[0].disabled -or $overview.accounts[0].err_total -gt 0){throw 'proxy fault penalized account'}
-  $result=@{image=$Image;image_id=$inspect.Image;chat='PASS';balance='PASS';refresh_restart='PASS';binding_restart='PASS';proxy_failure_status=[int]$failed.StatusCode;direct=$counts.direct;proxy=$counts.proxy;paths=$counts.paths;account_not_penalized=$true}
+  $result=@{image=$Image;image_id=$inspect.Image;scheme=$Scheme;chat='PASS';balance='PASS';refresh_restart='PASS';binding_restart='PASS';proxy_failure_status=[int]$failed.StatusCode;direct=$counts.direct;proxy=$counts.proxy;socks=$counts.socks;socks_targets=$counts.socks_targets;paths=$counts.paths;account_not_penalized=$true}
   WriteJSON 'result.json' $result
   $result|ConvertTo-Json -Depth 10
 } finally {

@@ -187,7 +187,7 @@ func validProxySlot(s egress.Slot) bool {
 	if len(s.Name) > 128 || len(s.Username) > 1024 || len(s.Password) > 4096 {
 		return false
 	}
-	if s.Scheme != "http" && s.Scheme != "https" {
+	if !egress.ValidProtocol(s.Scheme, s.Username, s.Password) {
 		return false
 	}
 	if s.Port < 1 || s.Port > 65535 || s.Host == "" || len(s.Host) > 253 || strings.TrimSpace(s.Host) != s.Host {

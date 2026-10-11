@@ -7,6 +7,80 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
 const clone = value => JSON.parse(JSON.stringify(value));
 const fixture = () => ({ revision: 7, slots: [{ id: 'slot-1', name: 'Exit A', enabled: true, scheme: 'http', host: 'proxy.test', port: 8080, username: 'user', has_password: true, transport_generation: 3, binding_count: 1, probe: { ip: '203.0.113.8', status: 'ok', generation: 3, latency_ms: 12, probed_at: new Date().toISOString() } }], accounts: { alice: { assigned: true, slot_id: 'slot-1', orphan: false, route: { state: 'ready' } }, bob: { assigned: false, slot_id: '', orphan: false, route: { state: 'direct' } }, gone: { assigned: true, slot_id: 'slot-1', orphan: true, route: { state: 'disabled' } } } });
+test('current generation HTTP IP success and CONNECT 400 remain partial, not stale or HTTPS success', () => {
+  const h = harness(), slot = fixture().slots[0];
+  Object.assign(slot.probe, { status: 'error', ip_status: 'ok', ip_checked_at: slot.probe.probed_at, https_status: 'error', error_code: 'proxy_connect_failed', error_stage: 'connect', error_reason: 'connect_rejected', proxy_status: 400 });
+  const html = h.ctx.proxyProbeHTML(slot);
+  assert.match(html, /203\.0\.113\.8/);
+  assert.match(html, /HTTP 观测/);
+  assert.match(html, /HTTPS 检测/);
+  assert.match(html, /CONNECT 400/);
+  assert.match(html, /代理拒绝隧道/);
+  assert.match(html, /出站仍停止/);
+  assert.match(html, /proxy_connect_failed/);
+  assert.doesNotMatch(html, /已过期|代际已变/);
+});
+test('same-generation failed first probe is failure only, not old generation or expired success', () => {
+  const h = harness(), slot = fixture().slots[0];
+  Object.assign(slot.probe, { status: 'error', ip: '', ip_status: 'error', https_status: 'error', error_code: 'proxy_timeout', error_stage: 'connect' });
+  const html = h.ctx.proxyProbeHTML(slot);
+  assert.match(html, /失败/);
+  assert.match(html, /尚无/);
+  assert.doesNotMatch(html, /已过期|代际已变/);
+});
+test('age and transport-generation messages are independent of latest failure', () => {
+  const h = harness(), slot = fixture().slots[0];
+  slot.probe.last_success_at = new Date(Date.now() - 16 * 60 * 1000).toISOString();
+  let html = h.ctx.proxyProbeHTML(slot);
+  assert.match(html, /成功结果已过期/);
+  assert.doesNotMatch(html, /代际已变/);
+  slot.probe.last_success_at = slot.probe.probed_at;
+  slot.probe.generation--;
+  html = h.ctx.proxyProbeHTML(slot);
+  assert.match(html, /代际已变/);
+  assert.doesNotMatch(html, /已过期/);
+});
+test('HTTPS-only success and legacy success stay readable without claiming HTTP observation', () => {
+  const h = harness(), slot = fixture().slots[0];
+  Object.assign(slot.probe, { ip_status: 'ok', https_status: 'ok' });
+  const html = h.ctx.proxyProbeHTML(slot);
+  assert.match(html, /HTTPS 检测/);
+  assert.match(html, /通过/);
+  assert.doesNotMatch(html, /HTTP 观测|出站仍停止/);
+  delete slot.probe.ip_status;
+  delete slot.probe.https_status;
+  assert.match(h.ctx.proxyProbeHTML(slot), /通过/);
+});
+test('safe diagnostic reasons distinguish authentication, SOCKS handshake, and response checks', () => {
+  const h = harness(), slot = fixture().slots[0];
+  Object.assign(slot.probe, { status: 'error', ip: '', https_status: 'error', error_code: 'proxy_auth_failed', error_stage: 'connect', error_reason: 'authentication_rejected', proxy_status: 407 });
+  assert.match(h.ctx.proxyProbeHTML(slot), /CONNECT 407.*代理认证失败/);
+  Object.assign(slot.probe, { error_stage: 'socks_handshake', error_reason: 'socks_connect_rejected', proxy_status: 0 });
+  assert.match(h.ctx.proxyProbeHTML(slot), /SOCKS 握手.*SOCKS 拒绝连接/);
+  Object.assign(slot.probe, { error_stage: 'probe_ip', error_reason: '<secret>', proxy_status: '<secret>' });
+  const html = h.ctx.proxyProbeHTML(slot);
+  assert.match(html, /出口 IP 响应/);
+  assert.doesNotMatch(html, /secret/);
+});
+test('SOCKS options retain selected protocol and password write-only behavior', async () => {
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+  assert.match(html, /value="socks5"/);
+  assert.match(html, /value="socks5h"/);
+  assert.match(html, /代理端 DNS/);
+  assert.match(html, /255 字节/);
+  for (const scheme of ['socks5', 'socks5h']) {
+    const h = harness(), data = fixture();
+    data.slots[0].scheme = scheme;
+    h.setData(data); await h.ctx.loadProxies(); h.ctx.openProxyEditor('slot-1');
+    assert.equal(h.form.elements.scheme.value, scheme);
+    assert.equal(h.form.elements.password.value, '');
+    await h.ctx.saveProxyEditor({ preventDefault() {} });
+    const patch = h.calls.find(c => c.method === 'PATCH');
+    assert.equal(patch.body.scheme, scheme);
+    assert.equal('password' in patch.body, false);
+    assert.deepEqual(h.storage, []);
+  }
+});
 test('failed probe retains last successful IP and time, marked stale separately from latest attempt', () => {
   const h=harness(),slot=fixture().slots[0];
   slot.probe.status='error';slot.probe.error_code='proxy_connect_failed';
@@ -116,7 +190,7 @@ test('route status is separate from account penalty; probe shows IP/time/stale g
   assert.match(h.ctx.proxyRouteHTML({ assigned: true, slot_id: 'slot-1', route: { state: 'disabled' } }), /代理停用/);
   assert.doesNotMatch(h.ctx.proxyRouteHTML({ assigned: true, slot_id: 'slot-1', route: { state: 'disabled' } }), /账号禁用|账号失效/);
   const slot = fixture().slots[0]; slot.probe.generation = 2; slot.probe.ip = '<script>';
-  assert.match(h.ctx.proxyProbeHTML(slot), /&lt;script&gt;/); assert.match(h.ctx.proxyProbeHTML(slot), /已过期/); assert.match(h.ctx.proxyProbeHTML(slot), /12 ms/);
+  assert.match(h.ctx.proxyProbeHTML(slot), /&lt;script&gt;/); assert.match(h.ctx.proxyProbeHTML(slot), /代际已变/); assert.match(h.ctx.proxyProbeHTML(slot), /12 ms/);
 });
 
 test('OAuth starts with selected server route, pending polls are single-flight, terminal stops and cancel releases', async () => {

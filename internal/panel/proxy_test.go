@@ -41,6 +41,32 @@ func proxyCall(t *testing.T, p *Panel, method, path, body, origin string) *httpt
 	return w
 }
 
+func TestSOCKSManagementAndCredentialLimits(t *testing.T) {
+	for _, scheme := range []string{"socks5", "socks5h"} {
+		t.Run(scheme, func(t *testing.T) {
+			p := proxyPanel(t, "key")
+			body := `{"revision":0,"scheme":"` + scheme + `","host":"proxy.invalid","port":1080,"username":"fixture","password":"synthetic-secret"}`
+			w := proxyCall(t, p, "POST", "/panel/api/proxies", body, "")
+			if w.Code != 201 {
+				t.Fatalf("SOCKS create: %d %s", w.Code, w.Body)
+			}
+			w = proxyCall(t, p, "GET", "/panel/api/proxies", "", "")
+			if w.Code != 200 || !strings.Contains(w.Body.String(), `"scheme":"`+scheme+`"`) || strings.Contains(w.Body.String(), "synthetic-secret") {
+				t.Fatal("SOCKS list disclosure or scheme mismatch", w.Body)
+			}
+			long := strings.Repeat("x", 256)
+			w = proxyCall(t, p, "PATCH", "/panel/api/proxies/slot-1", `{"revision":1,"password":"`+long+`"}`, "")
+			if w.Code != 400 {
+				t.Fatalf("SOCKS octet limit ignored: %d", w.Code)
+			}
+			w = proxyCall(t, p, "PATCH", "/panel/api/proxies/slot-1", `{"revision":1,"username":""}`, "")
+			if w.Code != 400 {
+				t.Fatalf("password-only SOCKS accepted: %d", w.Code)
+			}
+		})
+	}
+}
+
 func TestProxyAdminBoundary(t *testing.T) {
 	p := proxyPanel(t, "")
 	w := proxyCall(t, p, "GET", "/panel/api/proxies", "", "")

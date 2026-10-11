@@ -14,7 +14,13 @@ T03 outbound/OAuth/WAF: high risk, complete outbound matrix, fail-closed and con
 T04 UI: medium risk, behavior tests and existing panel tests.
 T05: integrated review, Linux Go1.23 test/vet/race, Docker four binaries, real browser desktop/mobile.
 One integrated specialist review, not per-task dual review.
-T06 production release requires separate approval; T07 CLI/SOCKS/discovery deferred.
+T06 production release requires separate approval; T07 CLI/discovery deferred.
+The 2026-10-11 diagnostics/SOCKS increment is specified in
+`D:\codex\.agentdocs\workflow\261011-panel-proxy-diagnostics-socks-plan.md`.
+SOCKS uses a small bounded handshake over stdlib net/context rather than
+Transport's detached native SOCKS dial: the original request context closes a
+canceled handshake socket, and its hook/deadline is removed before connection reuse.
+Plain HTTP IP observations are display-only; `verified_ip` preserves the trusted WAF identity.
 
 ## T02 interfaces (root-owned integration contract)
 

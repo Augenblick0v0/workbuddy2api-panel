@@ -34,6 +34,13 @@ type ProbeResult struct {
 	SuccessfulAt time.Time `json:"last_success_at,omitempty"`
 	Status       string    `json:"status"`
 	ErrorCode    string    `json:"error_code,omitempty"`
+	IPStatus     string    `json:"ip_status,omitempty"`
+	IPCheckedAt  time.Time `json:"ip_checked_at,omitempty"`
+	HTTPSStatus  string    `json:"https_status,omitempty"`
+	ErrorStage   string    `json:"error_stage,omitempty"`
+	ErrorReason  string    `json:"error_reason,omitempty"`
+	ProxyStatus  int       `json:"proxy_status,omitempty"`
+	VerifiedIP   string    `json:"verified_ip,omitempty"`
 }
 type Config struct {
 	SchemaVersion int               `json:"schema_version"`
@@ -61,15 +68,18 @@ type Options struct {
 	BaseTransport *http.Transport
 	AllowedCIDRs  []string
 	ProbeURL      string
+	ProbeHTTPSURL string // Test-only dual-phase override; never accepted by the management API.
 	Resolver      Resolver
 }
 type EgressError struct {
-	Code       string `json:"code"`
-	SlotID     string `json:"slot_id,omitempty"`
-	Generation uint64 `json:"generation,omitempty"`
-	Stage      string `json:"stage,omitempty"`
-	RetryAfter int    `json:"retry_after,omitempty"`
-	Sent       bool   `json:"sent"`
+	Code        string `json:"code"`
+	SlotID      string `json:"slot_id,omitempty"`
+	Generation  uint64 `json:"generation,omitempty"`
+	Stage       string `json:"stage,omitempty"`
+	RetryAfter  int    `json:"retry_after,omitempty"`
+	Sent        bool   `json:"sent"`
+	ProxyStatus int    `json:"proxy_status,omitempty"`
+	Reason      string `json:"reason,omitempty"`
 }
 
 func (e *EgressError) Error() string { return "egress: " + e.Code }

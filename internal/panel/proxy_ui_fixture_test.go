@@ -35,6 +35,10 @@ func TestProxyUIFixtureServe(t *testing.T) {
 	proxy := func(ip string, count *atomic.Int64) *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			count.Add(1)
+			if r.Method == http.MethodConnect {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			var data any = map[string]any{}
 			switch {
@@ -68,7 +72,7 @@ func TestProxyUIFixtureServe(t *testing.T) {
 	dir := t.TempDir()
 	base := upstream.New()
 	manager, err := egress.Open(filepath.Join(dir, "data", "proxies.json"), egress.Options{
-		BaseTransport: base.HTTP.Transport.(*http.Transport), AllowedCIDRs: []string{"127.0.0.0/8"}, ProbeURL: "http://probe.fixture/ip",
+		BaseTransport: base.HTTP.Transport.(*http.Transport), AllowedCIDRs: []string{"127.0.0.0/8"}, ProbeURL: "http://probe.fixture/ip", ProbeHTTPSURL: "https://probe.fixture/ip",
 	})
 	if err != nil {
 		t.Fatal(err)
