@@ -1,6 +1,6 @@
 # 2026-10-11 代理诊断与 SOCKS 增量验收
 
-状态：2026-10-11已获明确批准并部署SOCKS版本；后续“探针误拦截积分查询”修复仅本地完成，尚未发布。真实SOCKS生产地址/账号链未测。
+状态：2026-10-11已获明确批准并部署SOCKS版本及后续“探针误拦截积分查询”修复；当前HTTP入口实际CONNECT400仍存在，积分未恢复成功。真实SOCKS生产账号链未专项验收。
 
 ## 现场原因
 
@@ -153,3 +153,14 @@ Panel旧版仅测HTTPS ipify，并将CONNECT非200合并为proxy_connect_failed�
   red/green、targeted、ui、linux-test/vet/race、build、http-e2e/socks-e2e日志及两张截图。
 - 当前修复结论：**开发完成，生产未发布**。生产仍为已发布的e03436d1镜像，
   后续部署须保留现有新增绑定、账号和最新运行数据，再按批准的发布窗口执行。
+
+### 探针修复正式发布补充（2026-10-11 20:38）
+- 用户明确批准后发布a6cdb89，生产镜像9d30e21e；healthy/restarts0、公网healthz200。
+- 以最新4槽（含2SOCKS5）、5绑定、6账号文件为准，19文件/10JSON冷备恢复校验通过，
+  config/token/代理配置与运行数据保留；其他服务未操作。
+- 备份：/opt/workbuddy2api-panel-backups/pre-panel-proxy-advisory-20261011-203641。
+- 线上验收时slot-1已有unavailable状态；失败探针CONNECT400前后状态保持，
+  一次积分查询仍为502/proxy_unavailable，当前入口积分未成功，不把发布成功等同业务成功。
+- 未改变账号绑定/槽代际；仅检测观测revision28→29。回滚目标支持SOCKS，
+  守卫拒绝未知协议且保留最新数据；不使用旧版无SOCKS支持的回滚路径。
+- 完整记录：D:\codex\.agentdocs\workflow\261011-panel-proxy-probe-advisory-release.md。
