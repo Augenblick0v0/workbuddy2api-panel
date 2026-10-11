@@ -23,6 +23,11 @@ type Auth struct {
 	// mu 串行化 RefreshToken 写与 SaveAtomic 读，防止并发写回半更新 token。
 	mu sync.Mutex
 
+	// CredentialEpoch changes only on an explicit OAuth replacement. Refresh
+	// snapshots compare it under mu, so a pre-login response never overwrites
+	// newly installed credentials. It is runtime-only, not an auth-file field.
+	CredentialEpoch uint64
+
 	AccessToken  string
 	RefreshToken string
 	ExpiresAt    int64 // Unix 秒
@@ -352,6 +357,37 @@ func (a *Auth) SaveAtomic() error {
 		return errors.New(msg)
 	}
 	return os.Rename(tmp, a.FilePath)
+}
+
+// ReplaceCredentials keeps the existing pool object and file path. Concurrent
+// SaveAtomic callers consequently see the new token after this critical section;
+// in-flight refresh responses are rejected by CredentialEpoch.
+func (a *Auth) ReplaceCredentials(candidate *Auth) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if candidate == nil || candidate == a {
+		return fmt.Errorf("invalid credential replacement")
+	}
+	if a.FilePath != "" {
+		candidate.FilePath = a.FilePath
+	}
+	if candidate.DeviceToken == "" {
+		candidate.DeviceToken = a.DeviceToken
+	}
+	if err := candidate.SaveAtomic(); err != nil {
+		return err
+	}
+	a.AccessToken = candidate.AccessToken
+	a.RefreshToken = candidate.RefreshToken
+	a.ExpiresAt = candidate.ExpiresAt
+	a.Domain = candidate.Domain
+	a.realm = candidate.realm
+	a.Nickname = candidate.Nickname
+	a.EnterpriseID = candidate.EnterpriseID
+	a.FilePath = candidate.FilePath
+	a.DeviceToken = candidate.DeviceToken
+	a.CredentialEpoch++
+	return nil
 }
 
 // LoadDir 扫描并解析 dir 下 workbuddy*.json；解析失败的文件静默跳过（启动日志由调用方统计）。
