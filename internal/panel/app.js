@@ -1161,7 +1161,7 @@ function proxyProbeHTML(slot) {
   const savedSuccess = parseAPITime(p.last_success_at);
   const success = savedSuccess > 0 ? savedSuccess : (p.status === 'ok' ? time : null);
   const stale = p.status !== 'ok' || p.generation !== slot.transport_generation || !success || Date.now() - success > 15 * 60 * 1000;
-  return '<span class="tag ' + (p.status === 'ok' ? 'ok' : 'warn') + '">' + esc(p.ip || (p.status === 'ok' ? 'IP 未知' : p.error_code || p.status)) + '</span>' +
+  return '<span class="tag ' + (p.status === 'ok' ? 'ok' : 'warn') + '">' + esc(p.ip || 'IP 未知') + '</span>' +
     (p.status !== 'ok' ? '<span class="tag warn">' + esc(p.error_code || p.status) + '</span>' : '') +
     '<div class="hint">上次成功：' + esc(success ? fmtLocalDateTime(success) : '尚无') +
     ' · 最近尝试：' + esc(time ? fmtLocalDateTime(time) : '时间未知') + ' · ' + esc(p.latency_ms || 0) + ' ms' +
