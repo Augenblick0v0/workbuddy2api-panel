@@ -76,3 +76,29 @@ Panel旧版仅测HTTPS ipify，并将CONNECT非200合并为proxy_connect_failed�
   原版“仅检查空绑定”回滚脚本不直接适用于SOCKS槽；保留最新token/data。
 - 实际39.109.113.97:4090对已测HTTPS目标仍拒绝CONNECT；应用更新只改善诊断，
   应由代理方提供支持CONNECT的入口或真实SOCKS服务。真实代理业务验收与生产发布分开记录。
+
+## 同会话续执行核验（2026-10-11 20:08起，Asia/Hong_Kong）
+
+- 用户要求在本会话执行计划；复核后T01–T05已有完整实现及验收，不重复开发。
+  T06仍沿用明确批准新版生产切换的边界；本次仅生产只读核对。
+- 本地产品源码提交仍为`5172fdadcf81a67e9dd9fbe7a8c526995c6bae67`，
+  并确认原Panel固定基线`d66384d9e3d69655f799d7d8f2e5fba1946e00ab`是其祖先。
+- 20:08生产HEAD仍为`2a682b3d664fa2dde371eee5b089d6c27563cfc8`，
+  运行镜像仍为`workbuddy2api-panel:account-proxy-20261011-136d5ec`，
+  容器running/healthy、重启数0。现存`docker-compose.override.yml`保留。
+- 当前生产`proxies.json`为schema1、revision8、2个HTTP槽、0个绑定；
+  auths内6个文件，config.json存在。只输出数量/协议等非秘密字段，
+  未下载生产凭据，未变更检测结果、槽、绑定、配置或服务。
+- 当前Docker引擎最初缺少候选镜像，因此补建交付制品。直接构建遇到DockerHub
+  frontend授权端点连接超时；仅从stdin省略首行syntax下载指令后成功，
+  仓库Dockerfile、Go1.23构建指令和TLS策略未修改。
+- 重建镜像ID与上次已验收制品完全一致：
+  `sha256:e03436d1ee3ba9d89f9dc9c01da89c03ae3bd90f258143648d02ace42309ff54`。
+  记录为`output/playwright/socks-rebuild-20261011.log`（首次失败）及
+  `output/playwright/socks-rebuild-native-20261011.log`（成功）。
+- 本轮实际执行四程序镜像构建；因源码及镜像均与既有验收一致，复用上述完整
+  test/vet/race、22项UI、真实Chrome及candidate-5e6988ee容器E2E证据，
+  未重复跑测试、浏览器或另启独立审查。未做额外文件哈希或制品传输。
+- 当前结论仍为：**开发完成，生产未发布**。待新版发布明确批准后，
+  重新盘点实时生产数据、做一致性备份及恢复校验，再仅切换wb2api；
+  真实SOCKS生产验收仍需用户提供有效入口。
