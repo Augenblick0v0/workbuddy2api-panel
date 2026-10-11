@@ -5,6 +5,7 @@ import (
 
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -128,7 +129,16 @@ func (b *ownedBody) Close() error { e := b.ReadCloser.Close(); b.once.Do(b.relea
 
 type probeContextKey struct{}
 
-func (m *Manager) RoundTrip(req *http.Request) (*http.Response, error) {
+func (m *Manager) RoundTrip(req *http.Request) (_ *http.Response, returnedErr error) {
+	defer func() {
+		var ee *EgressError
+		if errors.As(returnedErr, &ee) {
+			// Only typed metadata, never the raw cause, proxy URL or request URL.
+			// Handles reaching RoundTrip are constructed from validated slot IDs.
+			log.Printf("WARN: [egress] slot=%s generation=%d stage=%s code=%s sent=%t",
+				ee.SlotID, ee.Generation, ee.Stage, ee.Code, ee.Sent)
+		}
+	}()
 	h, _ := req.Context().Value(routeContextKey{}).(*RouteHandle)
 	if h == nil || h.manager != m || h.released.Load() {
 		return nil, &EgressError{Code: "proxy_route_required", Stage: "context"}
