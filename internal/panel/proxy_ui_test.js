@@ -31,12 +31,23 @@ test('failed probe is a route warning rather than business-unavailable status', 
   data.accounts.alice.route.state = 'unavailable';
   h.setData(data); await h.ctx.loadProxies();
   html = h.ctx.accountRouteHTML('alice');
-  assert.match(html, /代理连接失败/);
+  assert.match(html, /代理故障冷却/);
   assert.doesNotMatch(html, /检测异常/);
   data.accounts.alice.route.state = 'ready';
   data.slots[0].probe.generation--;
   h.setData(data); await h.ctx.loadProxies();
   assert.doesNotMatch(h.ctx.accountRouteHTML('alice'), /检测异常/);
+});
+test('temporary proxy fault displays bounded recovery without requiring a manual probe', async () => {
+  const h = harness(), data = fixture();
+  Object.assign(data.accounts.alice.route, { state: 'unavailable', retry_after: 15 });
+  h.setData(data); await h.ctx.loadProxies();
+  const html = h.ctx.accountRouteHTML('alice');
+  assert.match(html, /代理故障冷却/);
+  assert.match(html, /后可重试/);
+  assert.match(html, /无需手动检测解锁/);
+  assert.match(html, /新请求仍尝试原代理/);
+  assert.doesNotMatch(html, /代理就绪/);
 });
 test('same-generation failed first probe is failure only, not old generation or expired success', () => {
   const h = harness(), slot = fixture().slots[0];

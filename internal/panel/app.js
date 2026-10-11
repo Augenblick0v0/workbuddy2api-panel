@@ -1119,7 +1119,7 @@ function proxyErrorText(e) {
     assignment_changed: '可分配账号已变化；请重新预览后确认',
     proxy_in_use: '该槽仍有账号绑定或 OAuth 会话占用；请先处理绑定或取消登录',
     proxy_disabled: '代理槽已停用；已绑定账号停止出站，不会改走直连',
-    proxy_unavailable: '代理当前不可用；请求已停止，不会回退直连',
+    proxy_unavailable: '代理暂时失败或槽不可用；请求已停止，故障冷却后新请求重试原代理，不回退直连',
     proxy_auth_failed: '代理认证失败；请检查槽凭据，账号状态不受惩罚',
     proxy_waf_blocked: '此出口处于 WAF 等待窗口；当前停止发送',
     proxy_store_failed: '配置落盘失败；未提交此次改动，请检查服务端存储',
@@ -1148,11 +1148,12 @@ function proxyRouteHTML(binding) {
   const slot = proxyData?.slots.find(s => s.id === binding.slot_id);
   const probeWarning = ['ready', 'proxy'].includes(route.state) && slot?.probe?.status === 'error' &&
     slot.probe.generation === slot.transport_generation;
-  const labels = { pending: '凭据提交待完成 · 出站已停止', disabled: '代理停用', missing: '槽缺失', unavailable: '代理连接失败', waf_blocked: '出口 WAF 等待', direct: '直连', ready: '代理就绪', proxy: '代理就绪', proxy_disabled: '代理停用', proxy_missing: '槽缺失', proxy_unavailable: '代理连接失败', proxy_waf_blocked: '出口 WAF 等待' };
+  const labels = { pending: '凭据提交待完成 · 出站已停止', disabled: '代理停用', missing: '槽缺失', unavailable: '代理故障冷却', waf_blocked: '出口 WAF 等待', direct: '直连', ready: '代理就绪', proxy: '代理就绪', proxy_disabled: '代理停用', proxy_missing: '槽缺失', proxy_unavailable: '代理故障冷却', proxy_waf_blocked: '出口 WAF 等待' };
   const good = !probeWarning && ['direct', 'ready', 'proxy'].includes(route.state);
   return '<span class="tag ' + (good ? 'ok' : 'warn') + '">' + esc(probeWarning ? '代理已绑定 · 检测异常' : labels[route.state] || route.state || '待检查') + '</span>' +
     '<div class="hint">' + esc(binding.assigned ? proxySlotLabel(binding.slot_id) : '未绑定 · 默认直连') +
-    (route.retry_after ? ' · ' + dur(route.retry_after) + ' 后重试' : '') + '</div>' +
+    (route.retry_after ? ' · ' + dur(route.retry_after) + ' 后可重试' : '') + '</div>' +
+    (route.state === 'unavailable' && route.retry_after ? '<div class="hint">无需手动检测解锁；冷却后新请求仍尝试原代理，失败不回退直连。</div>' : '') +
     (probeWarning ? '<div class="hint">检测仅供参考；实际请求仍经此代理。</div>' : '');
 }
 function accountRouteHTML(uid) {

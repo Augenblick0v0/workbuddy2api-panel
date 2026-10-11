@@ -70,6 +70,9 @@ type Options struct {
 	ProbeURL      string
 	ProbeHTTPSURL string // Test-only dual-phase override; never accepted by the management API.
 	Resolver      Resolver
+	// FailureCooldown bounds a transport-fault pause. Zero uses 15 seconds.
+	// It is a process policy, not persisted or writable via management APIs.
+	FailureCooldown time.Duration
 }
 type EgressError struct {
 	Code        string `json:"code"`
@@ -142,7 +145,7 @@ func WithRoute(ctx context.Context, h *RouteHandle) context.Context {
 }
 
 type runtimeState struct {
-	unavailable map[string]bool
+	unavailable map[string]time.Time
 	waf         map[string]time.Time
 }
 type Manager struct {
@@ -153,6 +156,6 @@ type Manager struct {
 	snapshot     atomic.Pointer[Config]
 	allowed      []*net.IPNet
 	transports   map[string]*generation
-	unavailable  map[string]bool
+	unavailable  map[string]time.Time
 	waf          map[string]time.Time
 }

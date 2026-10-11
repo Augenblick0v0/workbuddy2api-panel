@@ -40,7 +40,10 @@ func clone(c Config) Config {
 	return n
 }
 func Open(path string, opts Options) (*Manager, error) {
-	m := &Manager{path: path, opts: opts, transports: map[string]*generation{}, unavailable: map[string]bool{}, waf: map[string]time.Time{}}
+	m := &Manager{path: path, opts: opts, transports: map[string]*generation{}, unavailable: map[string]time.Time{}, waf: map[string]time.Time{}}
+	if m.opts.FailureCooldown <= 0 {
+		m.opts.FailureCooldown = 15 * time.Second
+	}
 	m.publishRuntimeLocked()
 	if opts.BaseTransport == nil {
 		m.opts.BaseTransport = http.DefaultTransport.(*http.Transport).Clone()

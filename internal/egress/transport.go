@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type proxyDialError struct{ cause error }
@@ -233,7 +234,9 @@ func (m *Manager) RoundTrip(req *http.Request) (_ *http.Response, returnedErr er
 }
 func (m *Manager) markUnavailable(h *RouteHandle) {
 	m.mu.Lock()
-	m.unavailable[h.transportKey] = true
+	// Stop this failed operation, but do not permanently poison the slot.
+	// Once this deadline expires, only a new request may retry the same route.
+	m.unavailable[h.transportKey] = time.Now().Add(m.opts.FailureCooldown)
 	m.publishRuntimeLocked()
 	m.mu.Unlock()
 }

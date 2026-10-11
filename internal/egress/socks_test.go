@@ -252,6 +252,64 @@ func TestSOCKSHTTPSAndFailureClosed(t *testing.T) {
 	}
 }
 
+func TestSOCKSRecoversAfterTransientFailureWithoutProbe(t *testing.T) {
+	for _, scheme := range []string{"socks5", "socks5h"} {
+		t.Run(scheme, func(t *testing.T) {
+			var calls, directDials atomic.Int64
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				io.WriteString(w, "recovered-via-socks")
+			}))
+			defer target.Close()
+			f := newSocksFixture(t, target.Listener.Addr().String(), "")
+			var fault atomic.Bool
+			fault.Store(true)
+			base := http.DefaultTransport.(*http.Transport).Clone()
+			dial := &net.Dialer{}
+			base.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+				if address == target.Listener.Addr().String() {
+					directDials.Add(1)
+				}
+				if fault.Load() {
+					return nil, errors.New("synthetic transient proxy dial failure")
+				}
+				return dial.DialContext(ctx, network, address)
+			}
+			m := managerWithSlot(t, slotFor(t, scheme+"://"+f.listener.Addr().String()), egress.Options{
+				BaseTransport: base, AllowedCIDRs: []string{"127.0.0.0/8"}, FailureCooldown: 200 * time.Millisecond,
+			})
+			h, err := m.ResolveAccount("account")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer h.Release()
+			if _, err = send(t, m, h, target.URL); err == nil || m.Available("account") || calls.Load() != 0 {
+				t.Fatal("SOCKS fault did not stop the operation", err)
+			}
+			fault.Store(false)
+			deadline := time.Now().Add(2 * time.Second)
+			for !m.Available("account") && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			next, err := m.ResolveAccount("account")
+			if err != nil {
+				t.Fatal("SOCKS recovery still needs manual exit detection", err)
+			}
+			defer next.Release()
+			resp, err := send(t, m, next, target.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if string(raw) != "recovered-via-socks" || calls.Load() != 1 || directDials.Load() != 0 ||
+				next.SlotID != h.SlotID || next.Generation != h.Generation {
+				t.Fatalf("wrong SOCKS recovery: body=%q calls=%d direct=%d", raw, calls.Load(), directDials.Load())
+			}
+		})
+	}
+}
+
 func TestSOCKSHandshakeErrors(t *testing.T) {
 	for _, tc := range []struct{ mode, code string }{
 		{"bad-auth", "proxy_auth_failed"}, {"reject-method", "proxy_auth_failed"},

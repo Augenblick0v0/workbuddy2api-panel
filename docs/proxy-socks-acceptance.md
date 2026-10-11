@@ -164,3 +164,20 @@ Panel旧版仅测HTTPS ipify，并将CONNECT非200合并为proxy_connect_failed�
 - 未改变账号绑定/槽代际；仅检测观测revision28→29。回滚目标支持SOCKS，
   守卫拒绝未知协议且保留最新数据；不使用旧版无SOCKS支持的回滚路径。
 - 完整记录：D:\codex\.agentdocs\workflow\261011-panel-proxy-probe-advisory-release.md。
+
+## 暂态故障自动恢复修复（2026-10-11）
+- 用户发现不检测就积分失败，检测成功后恢复；生产源码证实unavailable为永久bool，
+  而成功检测删除它。21:29:51/21:48:21两个SOCKS槽分别失败/超时，随后手测恢复。
+- 改为进程内截止时间：真实错误当次停止，默认15秒冷却，到期后仅新请求重试原槽。
+  没有后台强制探测、出口轮换、直连回退或失败请求重放；持久schema/API/config未变。
+- `Options.FailureCooldown`为Manager进程策略，默认15秒，无管理接口写入口。
+  固定账号/OAuth代际、pending、WAF、停用/缺失及账号自身冷却继续独立生效。
+- 回归先红：原状态RetryAfter=0；修复后HTTP以及SOCKS5/SOCKS5H均无需Probe恢复。
+  持续故障再冷却、默认15秒上限、WAF/停用独立、原槽原代际、直连0均断言通过。
+- 本地egress/panel定向测试、24项UI行为通过；LinuxGo1.23.12全量test/vet与五包race通过，
+  四二进制镜像构建通过。一次独立集中审查无阻塞发现、未重复运行相同测试。
+- 候选`workbuddy2api-panel:proxy-recovery-candidate`，
+  ID `sha256:168c44363fb06c1fe78d6bcaae37477c0c92080a432c6330d3bb3bb967f8c78a`。
+- UI仅状态标签/说明变更，无布局变化；以新增行为测试确认冷却期限和无需手动解锁，
+  复用上一版本真实Chrome桌面/手机布局验收，不重复浏览器流程。
+- 日志位于`output/playwright/failure-recovery-*`；正式发布结果另行追加。

@@ -86,8 +86,12 @@ func (m *Manager) statusLocked(c *Config, id string) RouteStatus {
 			return s
 		}
 		s.State = "ready"
-		if m.observations.Load().unavailable[transportKey(id, s.Generation)] {
+		if until := m.observations.Load().unavailable[transportKey(id, s.Generation)]; until.After(time.Now()) {
 			s.State = "unavailable"
+			s.RetryAfter = int(math.Ceil(time.Until(until).Seconds()))
+			if s.RetryAfter < 1 {
+				s.RetryAfter = 1
+			}
 			return s
 		}
 	} else {
@@ -203,7 +207,7 @@ func (m *Manager) CloseIdleConnections() {
 var _ http.RoundTripper = (*Manager)(nil)
 
 func (m *Manager) publishRuntimeLocked() {
-	r := &runtimeState{unavailable: map[string]bool{}, waf: map[string]time.Time{}}
+	r := &runtimeState{unavailable: map[string]time.Time{}, waf: map[string]time.Time{}}
 	for k, v := range m.unavailable {
 		r.unavailable[k] = v
 	}
