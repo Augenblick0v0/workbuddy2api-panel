@@ -162,7 +162,9 @@ func (m *Manager) Probe(ctx context.Context, id string) (ProbeResult, error) {
 		break
 	}
 	if err != nil {
-		m.markUnavailable(h)
+		// A fixed public probe may be rejected while the actual business host
+		// remains reachable through this proxy. Preserve diagnostic failure,
+		// but only real account/OAuth traffic can mark the route unavailable.
 		return result, &EgressError{Code: result.ErrorCode, SlotID: id, Generation: h.Generation, Stage: result.ErrorStage, Reason: result.ErrorReason, ProxyStatus: result.ProxyStatus}
 	}
 	m.mu.Lock()

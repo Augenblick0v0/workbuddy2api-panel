@@ -51,9 +51,50 @@ func TestProbeHTTPIPDoesNotHideConnectFailure(t *testing.T) {
 		result.ErrorReason != "connect_rejected" || !result.SuccessfulAt.IsZero() {
 		t.Fatalf("HTTP success hid HTTPS failure: %+v err=%v", result, err)
 	}
-	if httpCalls.Load() != 1 || connects.Load() != 1 || m.Available("account") {
+	if httpCalls.Load() != 1 || connects.Load() != 1 || !m.Available("account") {
 		t.Fatalf("unexpected requests/availability: http=%d connect=%d available=%t",
 			httpCalls.Load(), connects.Load(), m.Available("account"))
+	}
+}
+
+func TestProbeTransportFailuresAreAdvisory(t *testing.T) {
+	for _, mode := range []string{"http_auth", "target_status", "proxy_dial", "socks_auth", "socks_timeout", "canceled"} {
+		t.Run(mode, func(t *testing.T) {
+			proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if mode == "http_auth" {
+					w.WriteHeader(http.StatusProxyAuthRequired)
+				} else {
+					w.WriteHeader(http.StatusBadGateway)
+				}
+			}))
+			defer proxy.Close()
+			slot := slotFor(t, proxy.URL)
+			if mode == "proxy_dial" {
+				proxy.Close()
+			}
+			if mode == "socks_auth" || mode == "socks_timeout" {
+				fault := "bad-auth"
+				if mode == "socks_timeout" {
+					fault = "stall"
+				}
+				socks := newSocksFixture(t, "", fault)
+				slot = slotFor(t, "socks5://"+socks.listener.Addr().String())
+				slot.Username, slot.Password = "synthetic-user", "synthetic-password"
+			}
+			m := managerWithSlot(t, slot, egress.Options{AllowedCIDRs: []string{"127.0.0.0/8"}, ProbeURL: "http://probe.invalid/"})
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			if mode == "canceled" {
+				cancel()
+			}
+			result, err := m.Probe(ctx, "slot-1")
+			if err == nil || result.Status != "error" {
+				t.Fatalf("failed probe was reported as success: result=%+v err=%v", result, err)
+			}
+			if !m.Available("account") {
+				t.Fatalf("diagnostic failure blocked business route: mode=%s status=%+v", mode, m.Status("account"))
+			}
+		})
 	}
 }
 
@@ -127,7 +168,8 @@ func TestHTTPOnlyObservationDoesNotMoveWAFToAnotherExit(t *testing.T) {
 	if err == nil || result.IP != "203.0.113.20" || result.VerifiedIP != "203.0.113.10" {
 		t.Fatal("lost display or trusted route evidence", result, err)
 	}
-	if m.Status("other").State != "ready" || m.Status("account").RouteKey != "ip:203.0.113.10" {
+	if m.Status("other").State != "ready" || m.Status("account").State != "waf_blocked" ||
+		m.Status("account").RouteKey != "ip:203.0.113.10" {
 		t.Fatal("plaintext observation contaminated another WAF exit")
 	}
 }

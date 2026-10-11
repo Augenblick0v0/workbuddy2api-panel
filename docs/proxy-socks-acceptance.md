@@ -1,6 +1,6 @@
 # 2026-10-11 代理诊断与 SOCKS 增量验收
 
-状态：2026-10-11已获明确批准并部署正式生产；数据保留、健康及现有HTTP代理诊断通过。真实SOCKS生产地址/账号链未测。
+状态：2026-10-11已获明确批准并部署SOCKS版本；后续“探针误拦截积分查询”修复仅本地完成，尚未发布。真实SOCKS生产地址/账号链未测。
 
 ## 现场原因
 
@@ -120,3 +120,36 @@ Panel旧版仅测HTTPS ipify，并将CONNECT非200合并为proxy_connect_failed�
   未重复已通过的源码测试、UI验收或E2E。真实SOCKS生产链路仍待入口。
 - 完整发布记录：
   `D:\codex\.agentdocs\workflow\261011-panel-proxy-diagnostics-socks-release.md`。
+
+## 后续修复：探针失败仅作诊断（2026-10-11）
+
+用户在将账号绑定HTTP槽后，积分查询报`egress: proxy_unavailable`。
+原实现把公共HTTPS探针失败写入整个槽的unavailable运行态，导致真实积分请求尚未发出即失败。
+
+- 在既有Panel管理/积分API接缝加入合成集成回归：
+  公共探针CONNECT400，但同一个HTTP代理允许真实积分目标的HTTPS CONNECT。
+  修复前测试得到502 `user resource: egress: proxy_unavailable`；
+  修复后积分750/1000成功，目标请求1次、直连拨号0次。
+- 删除Probe失败对unavailable的写入，底层Transport的探针错误也不污染业务故障状态。
+  失败检测仍记录原错误；真实业务代理认证/连接失败、禁用、缺失、WAF和pending保持原阻断。
+  已有真实故障不会被失败探针解除，实际失败后不自动重试/切槽/直连。
+- UI区分“代理已绑定 · 检测异常”和“代理连接失败”，明确说明检测不会单独阻止账号请求。
+  旧代际检测不覆盖当前路由显示；HTTP观测仍不等于HTTPS成功，WAF已验证IP规则不变。
+- 定向五包Go测试、23项Node行为测试通过；Linux Go1.23.12全量test/vet与五包race通过。
+  新镜像四程序构建成功：`workbuddy2api-panel:proxy-probe-advisory-candidate`，
+  ID `sha256:9d30e21e6573f84f7efa04fcc04902d7b8cf9b80dc8ad7d78fce1b21ef06d570`。
+- 新镜像分别完成HTTP与SOCKS5H容器E2E：聊天/余额/刷新/重启持久化通过，
+  两轮各proxy11、direct0，断代理502且不罚号。一次独立综合审查无阻塞发现，
+  并补强失败探针后仍为waf_blocked的断言。
+- 真实Chrome使用合成API及当前静态资源，桌面1440×900、手机390×844视口目检通过；
+  “检测异常”和说明清晰，无横向溢出。截图为完整页面，不代表生产实际账号数据。
+  CLI初始化脚本遇到Windows参数解析和隐藏DOM重复匹配，改为文件输入及可见绑定容器定位后完成。
+- 除审查补强测试后的最终Linux验证外，没有重复同状态完整测试；没有源码哈希检查。
+  本修复未向生产传输制品、未重启生产、未更改真实账号绑定。
+- 另从生产仅做无账号凭据的HTTP/1.1 CONNECT验证：
+  slot-1对`www.codebuddy.cn:443`及`www.workbuddy.ai:443`均返回400。
+  因此解除探针预阻断不代表当前代理即可完成真实积分查询，入口仍须允许实际业务CONNECT。
+- 证据位于`output/playwright/probe-advisory-*`：
+  red/green、targeted、ui、linux-test/vet/race、build、http-e2e/socks-e2e日志及两张截图。
+- 当前修复结论：**开发完成，生产未发布**。生产仍为已发布的e03436d1镜像，
+  后续部署须保留现有新增绑定、账号和最新运行数据，再按批准的发布窗口执行。

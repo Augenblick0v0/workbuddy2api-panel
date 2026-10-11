@@ -16,9 +16,27 @@ test('current generation HTTP IP success and CONNECT 400 remain partial, not sta
   assert.match(html, /HTTPS 检测/);
   assert.match(html, /CONNECT 400/);
   assert.match(html, /代理拒绝隧道/);
-  assert.match(html, /出站仍停止/);
+  assert.match(html, /不会单独阻止账号请求/);
+  assert.doesNotMatch(html, /出站仍停止/);
   assert.match(html, /proxy_connect_failed/);
   assert.doesNotMatch(html, /已过期|代际已变/);
+});
+test('failed probe is a route warning rather than business-unavailable status', async () => {
+  const h = harness(), data = fixture();
+  Object.assign(data.slots[0].probe, { status: 'error', ip_status: 'ok', https_status: 'error', proxy_status: 400 });
+  h.setData(data); await h.ctx.loadProxies();
+  let html = h.ctx.accountRouteHTML('alice');
+  assert.match(html, /检测异常/);
+  assert.doesNotMatch(html, /代理不可用|代理就绪|代理连接失败/);
+  data.accounts.alice.route.state = 'unavailable';
+  h.setData(data); await h.ctx.loadProxies();
+  html = h.ctx.accountRouteHTML('alice');
+  assert.match(html, /代理连接失败/);
+  assert.doesNotMatch(html, /检测异常/);
+  data.accounts.alice.route.state = 'ready';
+  data.slots[0].probe.generation--;
+  h.setData(data); await h.ctx.loadProxies();
+  assert.doesNotMatch(h.ctx.accountRouteHTML('alice'), /检测异常/);
 });
 test('same-generation failed first probe is failure only, not old generation or expired success', () => {
   const h = harness(), slot = fixture().slots[0];

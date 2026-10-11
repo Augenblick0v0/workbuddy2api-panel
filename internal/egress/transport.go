@@ -196,12 +196,16 @@ func (m *Manager) RoundTrip(req *http.Request) (_ *http.Response, returnedErr er
 		}
 		var ee *EgressError
 		if errors.As(err, &ee) {
-			m.markUnavailable(h)
+			if !probe {
+				m.markUnavailable(h)
+			}
 			return nil, ee
 		}
 		if (slot.Scheme == "socks5" || slot.Scheme == "socks5h") &&
 			!upstreamStarted.Load() && errors.Is(req.Context().Err(), context.DeadlineExceeded) {
-			m.markUnavailable(h)
+			if !probe {
+				m.markUnavailable(h)
+			}
 			return nil, &EgressError{Code: "proxy_timeout", SlotID: h.SlotID, Generation: h.Generation, Stage: "socks_handshake", Reason: "deadline", Sent: sent.Load()}
 		}
 		var de *proxyDialError
@@ -211,7 +215,9 @@ func (m *Manager) RoundTrip(req *http.Request) (_ *http.Response, returnedErr er
 			if errors.As(err, &ne) && ne.Timeout() {
 				code = "proxy_timeout"
 			}
-			m.markUnavailable(h)
+			if !probe {
+				m.markUnavailable(h)
+			}
 			return nil, &EgressError{Code: code, SlotID: h.SlotID, Generation: h.Generation, Stage: "connect", Sent: sent.Load()}
 		}
 		// Ordinary upstream failures are sanitized but do not poison the proxy slot.

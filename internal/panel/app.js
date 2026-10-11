@@ -1145,11 +1145,15 @@ function proxySlotLabel(id) {
 function proxyRouteHTML(binding) {
   if (!binding) return '<span class="note">路由状态待载入</span>';
   const route = binding.route || {};
-  const labels = { pending: '凭据提交待完成 · 出站已停止', disabled: '代理停用', missing: '槽缺失', unavailable: '代理不可用', waf_blocked: '出口 WAF 等待', direct: '直连', ready: '代理就绪', proxy: '代理就绪', proxy_disabled: '代理停用', proxy_missing: '槽缺失', proxy_unavailable: '代理不可用', proxy_waf_blocked: '出口 WAF 等待' };
-  const good = ['direct', 'ready', 'proxy'].includes(route.state);
-  return '<span class="tag ' + (good ? 'ok' : 'warn') + '">' + esc(labels[route.state] || route.state || '待检查') + '</span>' +
+  const slot = proxyData?.slots.find(s => s.id === binding.slot_id);
+  const probeWarning = ['ready', 'proxy'].includes(route.state) && slot?.probe?.status === 'error' &&
+    slot.probe.generation === slot.transport_generation;
+  const labels = { pending: '凭据提交待完成 · 出站已停止', disabled: '代理停用', missing: '槽缺失', unavailable: '代理连接失败', waf_blocked: '出口 WAF 等待', direct: '直连', ready: '代理就绪', proxy: '代理就绪', proxy_disabled: '代理停用', proxy_missing: '槽缺失', proxy_unavailable: '代理连接失败', proxy_waf_blocked: '出口 WAF 等待' };
+  const good = !probeWarning && ['direct', 'ready', 'proxy'].includes(route.state);
+  return '<span class="tag ' + (good ? 'ok' : 'warn') + '">' + esc(probeWarning ? '代理已绑定 · 检测异常' : labels[route.state] || route.state || '待检查') + '</span>' +
     '<div class="hint">' + esc(binding.assigned ? proxySlotLabel(binding.slot_id) : '未绑定 · 默认直连') +
-    (route.retry_after ? ' · ' + dur(route.retry_after) + ' 后重试' : '') + '</div>';
+    (route.retry_after ? ' · ' + dur(route.retry_after) + ' 后重试' : '') + '</div>' +
+    (probeWarning ? '<div class="hint">检测仅供参考；实际请求仍经此代理。</div>' : '');
 }
 function accountRouteHTML(uid) {
   return '<div class="proxy-account-route">' + proxyRouteHTML(proxyData?.accounts[uid]) + '</div>';
@@ -1182,7 +1186,7 @@ function proxyProbeHTML(slot) {
     '<div class="proxy-probe-row"><span class="note">HTTPS 检测</span><span class="tag ' + (httpsOK ? 'ok' : 'warn') + '">' +
     (httpsOK ? '通过' : httpsStatus === 'error' ? '失败' : '尚未完成') + '</span>' +
     (!httpsOK && failure ? '<span class="hint">' + failure + '</span>' : '') + '</div>' +
-    (httpOnly ? '<div class="hint">仅获取 HTTP 出口信息；HTTPS 未通过，账号出站仍停止，不回退直连。</div>' : '') +
+    (p.status === 'error' ? '<div class="hint">检测失败不会单独阻止账号请求；实际请求仍经绑定代理，连接失败不回退直连。</div>' : '') +
     (httpsOK ? '<div class="hint">仅固定 HTTPS 探针通过，不代表账号登录或业务验证成功。</div>' : '') +
     (ipTime > 0 ? '<div class="hint">IP 观测：' + esc(fmtLocalDateTime(ipTime)) + '</div>' : '') +
     '<div class="hint">上次成功（全检测）：' + esc(success ? fmtLocalDateTime(success) : '尚无') +
