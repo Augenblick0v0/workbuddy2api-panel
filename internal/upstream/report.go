@@ -90,7 +90,7 @@ func isTransientBillingErr(err error) bool {
 // 不用本策略——它有自己的换号轮转语义，重试会放大在途请求。
 func (c *Client) retryBillingTransient(fn func() error) error {
 	err := fn()
-	if err == nil || c.Egress != nil || !isTransientBillingErr(err) {
+	if err == nil || !isTransientBillingErr(err) {
 		return err
 	}
 	for i := 1; i <= 2; i++ {
@@ -100,6 +100,30 @@ func (c *Client) retryBillingTransient(fn func() error) error {
 		}
 	}
 	return err
+}
+
+// retryBillingAccount is reserved for the existing idempotent balance/check-in
+// operations. Confirmed server errors keep their old bounded retry policy, but
+// the complete operation retains one account route snapshot. All EgressError
+// failures, including uncertain body/transport failures, stop immediately.
+func (c *Client) retryBillingAccount(a *auth.Auth, fn func(*Client) error) error {
+	if c.Egress == nil {
+		return c.retryBillingTransient(func() error { return fn(c) })
+	}
+	h := c.fixedRoute
+	if h == nil {
+		if a == nil || a.UID == "" {
+			return &egress.EgressError{Code: "proxy_route_required", Stage: "account"}
+		}
+		var err error
+		h, err = c.Egress.ResolveAccount(a.UID)
+		if err != nil {
+			return err
+		}
+		defer h.Release()
+	}
+	route := c.ForRoute(h)
+	return route.retryBillingTransient(func() error { return fn(route) })
 }
 
 // chatRequestEvent 客户端 chat_request_send 事件完整形状（与 probe_active.py chat_event 对齐）。

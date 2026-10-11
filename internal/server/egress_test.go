@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -23,7 +24,7 @@ import (
 func serverProxyFixture(t *testing.T, proxies ...string) (*upstream.Client, *egress.Manager) {
 	t.Helper()
 	c := upstream.New()
-	m, err := egress.Open(filepath.Join(t.TempDir(), "proxies.json"), egress.Options{BaseTransport: c.HTTP.Transport.(*http.Transport), AllowedCIDRs: []string{"127.0.0.0/8"}})
+	m, err := egress.Open(filepath.Join(t.TempDir(), "proxies.json"), egress.Options{BaseTransport: c.HTTP.Transport.(*http.Transport), AllowedCIDRs: []string{"127.0.0.0/8"}, ProbeURL: "http://probe.invalid/ip"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,5 +188,105 @@ func TestProxyStickyBlockedStopsBeforeReplacement(t *testing.T) {
 	}
 	if _, ok := router.Peek("fixture"); ok {
 		t.Fatal("blocked sticky not unbound")
+	}
+}
+
+func TestProxyWAFThresholdSurvivesProbePublication(t *testing.T) {
+	var chats, probes atomic.Int64
+	makeProxy := func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/ip" {
+				probes.Add(1)
+				w.Write([]byte(`{"ip":"203.0.113.8"}`))
+				return
+			}
+			chats.Add(1)
+			w.WriteHeader(403)
+			w.Write([]byte("<html>blocked</html>"))
+		}))
+	}
+	first, second := makeProxy(), makeProxy()
+	defer first.Close()
+	defer second.Close()
+	c, m := serverProxyFixture(t, first.URL, second.URL)
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "A", AccessToken: "a", ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	p.SetRouteAvailable(m.Available)
+	h := NewHandler(Config{Pool: p, Upstream: c, MaxRotate: 1})
+	proxyChat(h) // UID A records a pre-probe unknown-slot hit.
+	for _, id := range []string{"slot-1", "slot-2"} {
+		if _, err := m.Probe(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p.Add(&auth.Auth{UID: "B", AccessToken: "b", ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	w := proxyChat(h) // UID B's now-known IP must merge A's original hit.
+	if !strings.Contains(w.Body.String(), "proxy_waf_blocked") || m.Available("A") || m.Available("B") {
+		t.Fatalf("probe reset WAF threshold: %s", w.Body.String())
+	}
+	proxyChat(h)
+	if chats.Load() != 2 || probes.Load() != 2 {
+		t.Fatalf("WAF/probe counts chats=%d probes=%d", chats.Load(), probes.Load())
+	}
+}
+
+func TestProxyWAFAliasMergeKeepsLatestHitAndLongestWindow(t *testing.T) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{"ip":"203.0.113.8"}`)) }))
+	defer proxy.Close()
+	_, m := serverProxyFixture(t, proxy.URL, proxy.URL)
+	now := time.Now()
+	longest := now.Add(2 * time.Minute)
+	g := routeWAFGates{buckets: map[string]*wafIPGate{
+		"slot-1:1": {hits: map[string]time.Time{"same": now.Add(-time.Second)}, until: now.Add(time.Minute)},
+		"slot-2:1": {hits: map[string]time.Time{"same": now, "other": now}, until: longest},
+	}}
+	for _, id := range []string{"slot-1", "slot-2"} {
+		if _, err := m.Probe(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	until, blocked := g.note(m, "slot-1:1", "same")
+	b := g.buckets["ip:203.0.113.8"]
+	if !blocked || !until.Equal(longest) || b == nil || !b.hits["same"].Equal(now) || len(b.hits) != 2 || len(g.buckets) != 1 {
+		t.Fatalf("alias merge lost hits/window: until=%v blocked=%v buckets=%+v", until, blocked, g.buckets)
+	}
+}
+
+func TestProxyStaleRefreshSessionDeadDoesNotDisableReplacement(t *testing.T) {
+	entered, resume := make(chan struct{}), make(chan struct{})
+	var chats atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/auth/token/refresh") {
+			close(entered)
+			<-resume
+			w.WriteHeader(401)
+			w.Write([]byte(`{"code":12153,"msg":"Offline user session not found"}`))
+			return
+		}
+		chats.Add(1)
+		if r.Header.Get("Authorization") != "Bearer new-login" {
+			t.Error("chat used stale token")
+		}
+		w.Write([]byte(sseOK))
+	}))
+	defer server.Close()
+	a := &auth.Auth{UID: "A", AccessToken: "old", RefreshToken: "old-refresh", ExpiresAt: time.Now().Add(-time.Minute).Unix(), FilePath: filepath.Join(t.TempDir(), "auth.json")}
+	c := upstream.New()
+	c.ChatBaseCN = server.URL
+	p := pool.New("")
+	p.Add(a)
+	h := NewHandler(Config{Pool: p, Upstream: c, MaxRotate: 1})
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- proxyChat(h) }()
+	<-entered
+	if err := a.ReplaceCredentials(&auth.Auth{UID: "A", AccessToken: "new-login", RefreshToken: "new-refresh", ExpiresAt: time.Now().Add(time.Hour).Unix()}); err != nil {
+		t.Fatal(err)
+	}
+	p.Revive("A")
+	close(resume)
+	w := <-done
+	state, _ := p.Status("A")
+	if w.Code != 200 || state.Disabled || state.ErrTotal != 0 || state.InFlight != 0 || chats.Load() != 1 || a.AccessTokenValue() != "new-login" {
+		t.Fatalf("stale refresh punished fresh credentials: %d %s %+v chats=%d", w.Code, w.Body.String(), state, chats.Load())
 	}
 }

@@ -25,6 +25,10 @@ func clone(c Config) Config {
 	for k, v := range c.Bindings {
 		n.Bindings[k] = v
 	}
+	n.PendingAccounts = make(map[string]bool, len(c.PendingAccounts))
+	for k, v := range c.PendingAccounts {
+		n.PendingAccounts[k] = v
+	}
 	n.ProbeResults = make(map[string]ProbeResult, len(c.ProbeResults))
 	for k, v := range c.ProbeResults {
 		n.ProbeResults[k] = v

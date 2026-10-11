@@ -566,6 +566,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					code := "proxy_unavailable"
 					if route.State == "waf_blocked" {
 						code = "proxy_waf_blocked"
+					} else if route.State == "pending" {
+						code = "proxy_account_transition"
 					}
 					ee := &egress.EgressError{Code: code, SlotID: route.SlotID, Generation: route.Generation, Stage: "sticky", RetryAfter: route.RetryAfter}
 					stopEgress(w, ee)
@@ -771,6 +773,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					code := "proxy_unavailable"
 					if route.State == "waf_blocked" {
 						code = "proxy_waf_blocked"
+					} else if route.State == "pending" {
+						code = "proxy_account_transition"
 					}
 					ee := &egress.EgressError{Code: code, SlotID: route.SlotID, Generation: route.Generation, Stage: "selection", RetryAfter: route.RetryAfter}
 					stopEgress(w, ee)
@@ -986,7 +990,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				if m := h.cfg.Upstream.Egress; m != nil {
 					key := uerr.RouteKey
 					if key != "" {
-						if until, blocked := h.wafRoutes.note(key, acct.UID); blocked {
+						if until, blocked := h.wafRoutes.note(m, key, acct.UID); blocked {
 							m.BlockWAF(key, until)
 							ee := &egress.EgressError{Code: "proxy_waf_blocked", Stage: "waf", RetryAfter: int(time.Until(until).Seconds()) + 1}
 							stopEgress(w, ee)

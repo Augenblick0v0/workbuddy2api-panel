@@ -208,7 +208,7 @@ func TestProxyRefreshReplacementBarrier(t *testing.T) {
 }
 
 func TestProxyBillingNeverReplays(t *testing.T) {
-	for _, mode := range []string{"407", "cut", "body-cut", "500"} {
+	for _, mode := range []string{"407", "cut", "body-cut"} {
 		t.Run(mode, func(t *testing.T) {
 			var calls atomic.Int64
 			proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -219,9 +219,6 @@ func TestProxyBillingNeverReplays(t *testing.T) {
 				case "body-cut":
 					w.Header().Set("Content-Length", "10000")
 					w.Write([]byte(`{"code":`))
-				case "500":
-					w.WriteHeader(500)
-					w.Write([]byte(`{"code":10000,"msg":"failure"}`))
 				case "cut":
 					conn, _, _ := w.(http.Hijacker).Hijack()
 					conn.Close()
@@ -234,6 +231,48 @@ func TestProxyBillingNeverReplays(t *testing.T) {
 				t.Fatalf("replayed: %v calls=%d", err, calls.Load())
 			}
 		})
+	}
+}
+
+func TestProxyKnownBillingServerErrorRetriesPinnedRoute(t *testing.T) {
+	oldDelay := billingRetryDelay
+	billingRetryDelay = 0
+	defer func() { billingRetryDelay = oldDelay }()
+	started, resume := make(chan struct{}), make(chan struct{})
+	var oldCalls, newCalls atomic.Int64
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if oldCalls.Add(1) == 1 {
+			close(started)
+			<-resume
+		}
+		w.WriteHeader(500)
+		w.Write([]byte(`{"code":10000,"msg":"fixture confirmed server error"}`))
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { newCalls.Add(1); w.Write([]byte(`{"code":0,"data":{}}`)) }))
+	defer second.Close()
+	c, m := proxyFixture(t, first.URL, second.URL)
+	c.BillingBaseCN = "http://upstream.invalid"
+	a := &auth.Auth{UID: "A", AccessToken: "fixture"}
+	done := make(chan error, 1)
+	go func() { done <- c.DailyCheckin(a) }()
+	<-started
+	_, err := m.Update(m.Snapshot().Revision, func(cfg *egress.Config) error { cfg.Bindings["A"] = "slot-2"; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(resume)
+	if err := <-done; err == nil {
+		t.Fatal("confirmed persistent server failure unexpectedly succeeded")
+	}
+	if oldCalls.Load() != 3 || newCalls.Load() != 0 {
+		t.Fatalf("retry changed snapshot: old=%d new=%d", oldCalls.Load(), newCalls.Load())
+	}
+	if err := c.DailyCheckin(a); err != nil {
+		t.Fatal(err)
+	}
+	if oldCalls.Load() != 3 || newCalls.Load() != 1 {
+		t.Fatal("next operation did not use updated binding")
 	}
 }
 

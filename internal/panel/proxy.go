@@ -454,6 +454,7 @@ func (p *Panel) proxyCleanOrphan(w http.ResponseWriter, r *http.Request) {
 	}
 	c, err := p.cfg.Egress.Update(*in.Revision, func(c *egress.Config) error {
 		delete(c.Bindings, uid)
+		delete(c.PendingAccounts, uid)
 		return nil
 	})
 	if err != nil {

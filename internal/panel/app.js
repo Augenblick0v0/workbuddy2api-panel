@@ -1145,7 +1145,7 @@ function proxySlotLabel(id) {
 function proxyRouteHTML(binding) {
   if (!binding) return '<span class="note">路由状态待载入</span>';
   const route = binding.route || {};
-  const labels = { disabled: '代理停用', missing: '槽缺失', unavailable: '代理不可用', waf_blocked: '出口 WAF 等待', direct: '直连', ready: '代理就绪', proxy: '代理就绪', proxy_disabled: '代理停用', proxy_missing: '槽缺失', proxy_unavailable: '代理不可用', proxy_waf_blocked: '出口 WAF 等待' };
+  const labels = { pending: '凭据提交待完成 · 出站已停止', disabled: '代理停用', missing: '槽缺失', unavailable: '代理不可用', waf_blocked: '出口 WAF 等待', direct: '直连', ready: '代理就绪', proxy: '代理就绪', proxy_disabled: '代理停用', proxy_missing: '槽缺失', proxy_unavailable: '代理不可用', proxy_waf_blocked: '出口 WAF 等待' };
   const good = ['direct', 'ready', 'proxy'].includes(route.state);
   return '<span class="tag ' + (good ? 'ok' : 'warn') + '">' + esc(labels[route.state] || route.state || '待检查') + '</span>' +
     '<div class="hint">' + esc(binding.assigned ? proxySlotLabel(binding.slot_id) : '未绑定 · 默认直连') +

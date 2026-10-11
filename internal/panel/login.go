@@ -413,6 +413,10 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 					return &egress.EgressError{Code: "oauth_rebind_required", Stage: "oauth_bind"}
 				}
 				c.Bindings[a.UID] = sess.route.SlotID
+				if c.PendingAccounts == nil {
+					c.PendingAccounts = map[string]bool{}
+				}
+				c.PendingAccounts[a.UID] = true
 				return nil
 			})
 			var ee *egress.EgressError
@@ -455,6 +459,36 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		terminal("oauth_credentials_failed")
 		proxyError(w, 500, "oauth_credentials_failed")
 		return
+	}
+	if p.cfg.Egress != nil {
+		// A durable transition guard also blocks an existing UID's old token
+		// during the bind->credential window and survives a failed write/restart.
+		for {
+			snap := p.cfg.Egress.Snapshot()
+			_, err := p.cfg.Egress.Update(snap.Revision, func(c *egress.Config) error {
+				if ctx.Err() != nil || c.Bindings[a.UID] != sess.route.SlotID {
+					return &egress.EgressError{Code: "oauth_proxy_changed", Stage: "oauth_finalize"}
+				}
+				if sess.route.SlotID != "" {
+					slot, ok := c.Slots[sess.route.SlotID]
+					if !ok || !slot.Enabled || slot.TransportGeneration != sess.route.Generation {
+						return &egress.EgressError{Code: "oauth_proxy_changed", Stage: "oauth_finalize"}
+					}
+				}
+				delete(c.PendingAccounts, a.UID)
+				return nil
+			})
+			var ee *egress.EgressError
+			if errors.As(err, &ee) && ee.Code == "revision_conflict" {
+				continue
+			}
+			if err != nil {
+				terminal("oauth_commit_failed")
+				p.loginFailure(w, err)
+				return
+			}
+			break
+		}
 	}
 	if p.cfg.Pool != nil {
 		p.cfg.Pool.Add(a)

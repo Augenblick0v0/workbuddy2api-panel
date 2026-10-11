@@ -3,6 +3,7 @@ package panel
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -509,6 +510,60 @@ func TestProxyOAuthReloginRebindConfirmation(t *testing.T) {
 	loaded, e := auth.LoadDir(f.authDir)
 	if e != nil || len(loaded) != 1 || loaded[0].AccessToken != "synthetic-new-access-token" {
 		t.Fatal("confirmed token not durable")
+	}
+}
+
+func TestProxyOAuthExistingCredentialFailureStopsAcrossRestart(t *testing.T) {
+	f := newProxyOAuthFixture(t)
+	if err := os.MkdirAll(f.authDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(f.authDir, "workbuddy-oauth-fixture-uid.json")
+	old := &auth.Auth{UID: "oauth-fixture-uid", AccessToken: "synthetic-old", RefreshToken: "synthetic-old-refresh", FilePath: path, EnterpriseID: "fixture-enterprise"}
+	if err := old.SaveAtomic(); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(path)
+	f.pool.Add(old)
+	if _, err := f.manager.Update(f.manager.Snapshot().Revision, func(c *egress.Config) error { c.Bindings[old.UID] = "slot-1"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	// A directory at the temp-file path deterministically fails credential writes
+	// on Windows and Linux without relying on chmod/root behavior.
+	if err := os.Mkdir(path+".tmp", 0700); err != nil {
+		t.Fatal(err)
+	}
+	state := f.start(t)
+	w := proxyCall(t, f.panel, http.MethodGet, "/panel/api/login/poll?state="+url.QueryEscape(state)+"&confirm_rebind=true", "", "")
+	if w.Code != 500 {
+		t.Fatal(w.Code, w.Body)
+	}
+	after, _ := os.ReadFile(path)
+	if !bytes.Equal(before, after) || old.AccessToken != "synthetic-old" || !f.manager.Snapshot().PendingAccounts[old.UID] {
+		t.Fatal("old credentials or durable guard lost")
+	}
+	f.pool.SetRouteAvailable(f.manager.Available)
+	if f.pool.PickByUID(old.UID) != nil {
+		t.Fatal("failed transition still selectable")
+	}
+	_, _, err := f.panel.cfg.Upstream.UserResource(old)
+	var ee *egress.EgressError
+	if !errors.As(err, &ee) || ee.Code != "proxy_account_transition" {
+		t.Fatal("maintenance not blocked", err)
+	}
+	restarted, err := egress.Open(f.storePath, egress.Options{AllowedCIDRs: []string{"127.0.0.0/8"}})
+	if err != nil || restarted.Available(old.UID) {
+		t.Fatal("restart cleared failed transition", err)
+	}
+	if err = os.Remove(path + ".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	// Explicitly restarting the same selected route completes credentials and
+	// clears the durable guard; no operator-side direct fallback is involved.
+	state = f.start(t)
+	assertOAuthDone(t, f.poll(t, state))
+	if f.manager.Snapshot().PendingAccounts[old.UID] || !f.manager.Available(old.UID) {
+		t.Fatal("completed credentials did not unlock account")
 	}
 }
 

@@ -912,13 +912,25 @@ const refreshTokenExpiresInMax = 10 * 365 * 24 * time.Hour
 //     独占 a.mu，阻塞同账号的 SaveAtomic / 其他刷新（issue:持锁 120s I/O）。
 //   - 写回前重新校验快照一致性：若锁外期间另一 goroutine 已完成刷新（refreshToken
 //     已变），本次结果直接采用（新 token 已生效），不再重复写回。
-func (c *Client) RefreshToken(a *auth.Auth) error {
+func (c *Client) RefreshToken(a *auth.Auth) (retErr error) {
 	// 第 1 段（锁内）：读快照。
 	a.Lock()
 	rtSnapshot := a.RefreshToken
 	atBefore := a.AccessToken
 	epoch := a.CredentialEpoch
 	a.Unlock()
+	// An old-token request may fail after OAuth installed new credentials. Its
+	// stale session-dead or transport error must not disable the revived account.
+	// Cover every failure exit, including malformed/truncated refresh responses.
+	defer func() {
+		if retErr != nil {
+			a.Lock()
+			if a.CredentialEpoch != epoch {
+				retErr = nil
+			}
+			a.Unlock()
+		}
+	}()
 	if strings.TrimSpace(rtSnapshot) == "" {
 		return fmt.Errorf("no refreshToken")
 	}
@@ -1993,9 +2005,9 @@ const (
 func (c *Client) enterpriseResource(a *auth.Auth, soon time.Duration) (remain, total, expiring int64, earliestAt time.Time, earliestRemaining int64, err error) {
 	// 与个人口径一致：余额是签到后的紧邻调用，偶发 500 值得有界重试。
 	var data json.RawMessage
-	err = c.retryBillingTransient(func() error {
+	err = c.retryBillingAccount(a, func(route *Client) error {
 		var e error
-		data, e = c.billingJSON(a, http.MethodPost, "/v2/billing/meter/get-enterprise-user-usage", map[string]any{})
+		data, e = route.billingJSON(a, http.MethodPost, "/v2/billing/meter/get-enterprise-user-usage", map[string]any{})
 		return e
 	})
 	if err != nil {
@@ -2072,9 +2084,9 @@ func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration
 	// 余额查询同样做瞬时错误有界重试（签到后紧接着的 user-resource 偶发 500 会让
 	// 该账号错过本次解冻/到期快照更新，只能等下一个刷新周期）。
 	var data json.RawMessage
-	err = c.retryBillingTransient(func() error {
+	err = c.retryBillingAccount(a, func(route *Client) error {
 		var e error
-		data, e = c.billingMeterJSON(a, c.billingMeterPaths(a), http.MethodPost, body)
+		data, e = route.billingMeterJSON(a, route.billingMeterPaths(a), http.MethodPost, body)
 		return e
 	})
 	if err != nil {
@@ -2182,8 +2194,8 @@ func packageRemainUsed(a respAccount) (remain, used, size int64) {
 // 偶发上游 5xx（code 10000）做有界重试（见 retryBillingTransient）——单次抖动不再
 // 让该账号整天漏签；「已签到」等业务错误不重试。
 func (c *Client) DailyCheckin(a *auth.Auth) error {
-	return c.retryBillingTransient(func() error {
-		_, err := c.billingMeterJSON(a, c.checkinMeterPaths(a), http.MethodPost, map[string]any{})
+	return c.retryBillingAccount(a, func(route *Client) error {
+		_, err := route.billingMeterJSON(a, route.checkinMeterPaths(a), http.MethodPost, map[string]any{})
 		return err
 	})
 }

@@ -3,6 +3,8 @@ package egress
 import (
 	"math"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -25,6 +27,34 @@ func (m *Manager) routeKeyLocked(c *Config, id string, g uint64) string {
 		return "ip:" + p.IP
 	}
 	return transportKey(id, g)
+}
+
+// CanonicalRouteKey promotes an unresolved route to its subsequently learned
+// IP only while that exact slot generation remains current. An already known IP
+// is historical request evidence, not an alias to a slot's newer observed IP.
+// This is an atomic-snapshot read and performs no network, disk, or lock I/O.
+func (m *Manager) CanonicalRouteKey(key string) string {
+	return m.canonicalRouteKey(m.snapshot.Load(), key)
+}
+
+func (m *Manager) canonicalRouteKey(c *Config, key string) string {
+	if key == "direct" {
+		return m.routeKeyLocked(c, "", 0)
+	}
+	if !strings.HasPrefix(key, "slot-") {
+		return key
+	}
+	sep := strings.LastIndexByte(key, ':')
+	if sep < 0 {
+		return key
+	}
+	id := key[:sep]
+	gen, err := strconv.ParseUint(key[sep+1:], 10, 64)
+	slot, ok := c.Slots[id]
+	if err != nil || !ok || slot.TransportGeneration != gen || key != transportKey(id, gen) {
+		return key
+	}
+	return m.routeKeyLocked(c, id, gen)
 }
 func (m *Manager) statusLocked(c *Config, id string) RouteStatus {
 	s := RouteStatus{State: "direct", SlotID: id, RouteKey: "direct"}
@@ -57,7 +87,11 @@ func (m *Manager) statusLocked(c *Config, id string) RouteStatus {
 }
 func (m *Manager) Status(uid string) RouteStatus {
 	c := m.snapshot.Load()
-	return m.statusLocked(c, c.Bindings[uid])
+	s := m.statusLocked(c, c.Bindings[uid])
+	if c.PendingAccounts[uid] {
+		s.State = "pending"
+	}
+	return s
 }
 func (m *Manager) Available(uid string) bool {
 	s := m.Status(uid)
@@ -67,6 +101,8 @@ func routeError(s RouteStatus) *EgressError {
 	code := "proxy_unavailable"
 	if s.State == "waf_blocked" {
 		code = "proxy_waf_blocked"
+	} else if s.State == "pending" {
+		code = "proxy_account_transition"
 	}
 	return &EgressError{Code: code, SlotID: s.SlotID, Generation: s.Generation, Stage: "resolve", RetryAfter: s.RetryAfter}
 }
@@ -74,7 +110,16 @@ func (m *Manager) ResolveAccount(uid string) (*RouteHandle, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	c := m.snapshot.Load()
-	return m.resolveLocked(c, c.Bindings[uid], false)
+	if c.PendingAccounts[uid] {
+		s := m.statusLocked(c, c.Bindings[uid])
+		s.State = "pending"
+		return nil, routeError(s)
+	}
+	h, err := m.resolveLocked(c, c.Bindings[uid], false)
+	if h != nil {
+		h.accountUID = uid
+	}
+	return h, err
 }
 func (m *Manager) ResolveSlot(id string) (*RouteHandle, error) {
 	m.mu.Lock()
@@ -125,6 +170,9 @@ func (m *Manager) CheckCurrent(h *RouteHandle) error {
 func (m *Manager) BlockWAF(routeKey string, until time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Serialize alias resolution with probe/config publication. A handle may
+	// have been resolved before the successful probe learned its current IP.
+	routeKey = m.canonicalRouteKey(m.snapshot.Load(), routeKey)
 	if until.After(m.waf[routeKey]) {
 		m.waf[routeKey] = until
 		m.publishRuntimeLocked()

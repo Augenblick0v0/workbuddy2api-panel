@@ -36,13 +36,16 @@ type ProbeResult struct {
 	ErrorCode    string    `json:"error_code,omitempty"`
 }
 type Config struct {
-	SchemaVersion int                        `json:"schema_version"`
-	Revision      uint64                     `json:"revision"`
-	NextSlotSeq   uint64                     `json:"next_slot_seq"`
-	Slots         map[string]Slot            `json:"slots"`
-	Bindings      map[string]string          `json:"bindings"`
-	ProbeResults  map[string]ProbeResult     `json:"probe_results"`
-	Operations    map[string]json.RawMessage `json:"operations,omitempty"`
+	SchemaVersion int               `json:"schema_version"`
+	Revision      uint64            `json:"revision"`
+	NextSlotSeq   uint64            `json:"next_slot_seq"`
+	Slots         map[string]Slot   `json:"slots"`
+	Bindings      map[string]string `json:"bindings"`
+	// PendingAccounts durably holds an OAuth credential/binding transition.
+	// Management binding edits never clear it; OAuth finalization does so.
+	PendingAccounts map[string]bool            `json:"pending_accounts,omitempty"`
+	ProbeResults    map[string]ProbeResult     `json:"probe_results"`
+	Operations      map[string]json.RawMessage `json:"operations,omitempty"`
 }
 type Resolver interface {
 	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
@@ -80,7 +83,7 @@ func HTTPStatus(err error) int {
 		return 409
 	case "proxy_store_failed":
 		return 500
-	case "proxy_unavailable", "proxy_waf_blocked", "proxy_route_required":
+	case "proxy_unavailable", "proxy_waf_blocked", "proxy_route_required", "proxy_account_transition":
 		return 503
 	case "proxy_timeout", "upstream_timeout":
 		return 504
@@ -110,6 +113,7 @@ type RouteHandle struct {
 	RouteKey     string
 	manager      *Manager
 	transportKey string
+	accountUID   string // empty for pre-identity OAuth ResolveSlot handles
 	release      sync.Once
 	released     atomic.Bool
 }

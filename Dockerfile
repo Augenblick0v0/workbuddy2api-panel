@@ -3,7 +3,7 @@ FROM golang:1.23-alpine AS build
 WORKDIR /src
 ARG GOPROXY=https://proxy.golang.org,direct
 ENV GOPROXY=${GOPROXY}
-COPY go.mod ./
+COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 # 一次编译全部二进制（工具进镜像，容器内可直接跑脚本）。全部 -trimpath -s -w。
@@ -30,6 +30,7 @@ COPY scripts/probe_active.py /app/scripts/probe_active.py
 RUN sed -i 's/\r$//' /app/login.sh /app/signin.sh /app/credit.sh && chmod 755 /app/login.sh /app/signin.sh /app/credit.sh
 # 镜像不带真实配置：落 example 作为默认（生产由挂载卷 /app/config.json 覆盖）
 COPY config.example.json /app/config.json
+COPY LICENSE /app/LICENSE
 USER app
 EXPOSE 7863
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \

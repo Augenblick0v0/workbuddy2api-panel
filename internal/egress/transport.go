@@ -137,6 +137,11 @@ func (m *Manager) RoundTrip(req *http.Request) (*http.Response, error) {
 	m.mu.Lock()
 	c := m.snapshot.Load()
 	s := m.statusLocked(c, h.SlotID)
+	if h.accountUID != "" && c.PendingAccounts[h.accountUID] {
+		s.State = "pending"
+		m.mu.Unlock()
+		return nil, routeError(s)
+	}
 	g := m.transports[h.transportKey]
 	if h.released.Load() || g == nil || g.retired || s.Generation != h.Generation {
 		m.mu.Unlock()
