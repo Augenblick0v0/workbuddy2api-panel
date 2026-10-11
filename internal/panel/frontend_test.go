@@ -113,7 +113,7 @@ try {
 		t.Fatal(err)
 	}
 	hf.Close()
-	for _, hash := range []string{"#taskscenter", "#accounts", "#usage", "#models", "#config", "#logs", "#packages"} {
+	for _, hash := range []string{"#taskscenter", "#accounts", "#usage", "#models", "#config", "#logs", "#packages", "#proxies"} {
 		cmd := exec.Command(node, hf.Name(), "app.js")
 		cmd.Dir = "." // 测试工作目录 = internal/panel
 		cmd.Env = append(os.Environ(), "SMOKE_HASH="+hash)
@@ -124,6 +124,18 @@ try {
 		if !bytes.Contains(out, []byte("SMOKE OK")) {
 			t.Fatalf("app.js smoke %s 未通过:\n%s", hash, out)
 		}
+	}
+}
+
+// TestProxyUIBehavior runs stateful interaction fixtures, not source-string checks.
+func TestProxyUIBehavior(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not available; proxy UI behavior test skipped")
+	}
+	out, err := exec.Command(node, "--test", "proxy_ui_test.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("proxy UI behavior failed: %v\n%s", err, out)
 	}
 }
 

@@ -586,6 +586,42 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .exp-main .note { margin-top: 2px; font-size: 11px; color: var(--ink-3); }
   .exp-main.err { color: var(--bad); }
 
+
+/* Account proxy controls follow the existing operational-console rhythm. */
+.proxy-notice { border-left: 3px solid var(--accent); padding: 12px 16px; color: var(--ink-2); background: var(--accent-soft); line-height: 1.7; }
+.proxy-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(260px,1fr)); gap: 14px; }
+.proxy-card { border: 1px solid var(--line); border-radius: 8px; min-width: 0; overflow: hidden; }
+.proxy-card > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px; background: var(--surface-2); }
+.proxy-card h3 { margin: 0; overflow-wrap: anywhere; }
+.proxy-card-body { padding: 14px; }
+.proxy-endpoint { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; margin-bottom: 6px; }
+.proxy-probe { margin: 14px 0; min-height: 42px; }
+.proxy-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.proxy-binding { display: grid; grid-template-columns: minmax(130px,1fr) minmax(150px,1fr) minmax(230px,1.3fr); gap: 14px; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--line-soft); }
+.proxy-binding:last-child { border-bottom: 0; }
+.proxy-uid { overflow-wrap: anywhere; }
+.proxy-binding-controls { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.proxy-binding-controls select { min-width: 0; flex: 1; }
+.proxy-account-route { margin-top: 7px; white-space: normal; }
+.proxy-account-route .tag { font-size: 10px; }
+.proxy-preview-row { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line-soft); overflow-wrap: anywhere; }
+.proxy-batch-preview { max-height: 320px; overflow: auto; margin-top: 14px; }
+.proxy-editor-error { color: var(--bad); margin-top: 12px; overflow-wrap: anywhere; }
+.proxy-form-row { display: flex; flex-wrap: wrap; gap: 18px; margin: 12px 0; }
+.proxy-editor-version { margin-bottom: 14px; }
+#proxyForm { display: flex; flex-direction: column; min-height: 0; }
+#proxyForm .body { min-height: 0; }
+.proxy-oauth-notice { margin: 12px 0; }
+@media (max-width: 700px) {
+  .proxy-grid { grid-template-columns: minmax(0,1fr); }
+  .proxy-binding { grid-template-columns: minmax(0,1fr); gap: 9px; }
+  .proxy-binding-controls { flex-wrap: wrap; }
+  .proxy-binding-controls select { flex-basis: 65%; }
+  #view-proxies .grid2 { grid-template-columns: minmax(0,1fr); }
+  #view-proxies header { flex-wrap: wrap; }
+  #proxyVeil .grid2 { grid-template-columns: minmax(0,1fr); }
+}
+
 </style>
 </head>
 <body>
@@ -611,6 +647,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <li><a href="#models" data-view="models">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/></svg>
         模型与档位</a></li>
+      <li><a href="#proxies" data-view="proxies">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.5" y="5" width="4" height="6" rx="1"/><rect x="10.5" y="5" width="4" height="6" rx="1"/><path d="M5.5 8h5M8 3v10"/></svg>
+        账号代理</a></li>
       <li><a href="#config" data-view="config">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v1.9M8 12.5v1.9M1.6 8h1.9M12.5 8h1.9M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>
         配置</a></li>
@@ -885,6 +924,34 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <thead id="usCreditHead"></thead>
             <tbody id="usCreditBody"></tbody>
           </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Account-scoped server egress, never browser-network configuration. -->
+    <section class="view" id="view-proxies" hidden>
+      <div class="box"><div class="proxy-notice">
+        <strong>固定出口 · 故障即停</strong><br>绑定账号的服务端请求统一使用所选槽；代理停用、认证或网络故障时停止发送，不回退直连、不借用其他槽。
+        <br>代理槽 ≠ 独立公网 IP：不同槽可能共用出口。检测仅反映检测时刻，不代表登录成功或账号限制解除。
+        <br>首版仅覆盖常驻 Panel 服务。绑定后请用面板 / API 维护；独立 login / signin / credit CLI 和 Python / shell 脚本尚未继承代理，暂勿用于绑定账号。
+      </div></div>
+      <div class="box">
+        <header><h3>代理槽</h3><span class="grow"></span><span class="note" id="proxyRevision">尚未载入</span><button class="xs" id="btnProxyReload">刷新状态</button><button class="xs primary" id="btnProxyAdd">添加代理槽</button></header>
+        <div class="pad"><p class="hint" id="proxyStatus" role="status">正在载入代理配置</p><div class="proxy-grid" id="proxySlots"></div></div>
+      </div>
+      <div class="box">
+        <header><h3>账号固定绑定</h3><span class="grow"></span><button class="xs" id="btnProxyBindingReset">放弃绑定修改</button></header>
+        <div class="pad"><p class="hint" id="proxyBindingNote"></p><div id="proxyBindings"></div></div>
+      </div>
+      <div class="box">
+        <header><h3>批量分配未绑定账号</h3><span class="hint">先预览，再确认；已有绑定与显式直连保持原样</span></header>
+        <div class="pad">
+          <div class="grid2">
+            <label class="fld"><span class="lb">账号域</span><select id="proxyBatchRealm"><option value="">全部</option><option value="cn">国内版</option><option value="global">国际版</option></select></label>
+            <label class="fld"><span class="lb">限定 UID（可选）</span><input id="proxyBatchUIDs" placeholder="留空为全部；多个 UID 用逗号或空格分隔" autocomplete="off"></label>
+          </div>
+          <div class="proxy-actions"><button id="btnProxyPreview">生成分配预览</button><button class="primary" id="btnProxyBatchConfirm" disabled>确认当前预览</button></div>
+          <div class="proxy-batch-preview hint" id="proxyBatchPreview" role="status">仅向启用槽分配；禁用或暂停账号会跳过。不自动轮换出口。</div>
         </div>
       </div>
     </section>
@@ -1201,6 +1268,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <!-- 浏览器登录 -->
       <div id="addTabLogin" class="tab-panel">
         <div id="addPick">
+          <label class="fld"><span class="lb">OAuth 服务端出口（发起后锁定）</span><select id="addProxySlot"><option value="">显式直连</option></select></label>
+          <div class="proxy-notice proxy-oauth-notice">所选代理覆盖服务端 OAuth 请求、换取 Token 与入池后的维护。浏览器打开官方授权网页仍使用浏览器自己的网络；此设置不接管浏览器代理。</div>
           <div class="realm-row">
             <span class="hint" style="font-size:12px">版本：</span>
             <label class="realm-opt"><input type="radio" name="addRealm" value="cn" checked> 国内版（CN）</label>
@@ -1232,6 +1301,32 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <button id="btnOpenUrl" class="primary" hidden>在浏览器打开</button>
       <button id="btnCloseAdd">关闭</button>
     </footer>
+  </div>
+</div>
+
+<!-- Proxy passwords are write-only and never inserted into HTML attributes. -->
+<div class="veil" id="proxyVeil" data-lock="1">
+  <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="proxyEditorTitle">
+    <header><h3 id="proxyEditorTitle">添加代理槽</h3></header>
+    <form id="proxyForm" autocomplete="off">
+      <div class="body">
+        <p class="hint proxy-editor-version" id="proxyEditorVersion"></p>
+        <label class="fld"><span class="lb">名称</span><input name="name" maxlength="128" placeholder="例如：固定出口 A" required></label>
+        <div class="grid2">
+          <label class="fld"><span class="lb">协议</span><select name="scheme"><option value="http">HTTP</option><option value="https">HTTPS（验证代理证书）</option></select></label>
+          <label class="fld"><span class="lb">端口</span><input name="port" type="number" min="1" max="65535" required></label>
+        </div>
+        <label class="fld"><span class="lb">主机（不含协议、路径或认证）</span><input name="host" placeholder="proxy.example.com" required></label>
+        <div class="grid2">
+          <label class="fld"><span class="lb">用户名（可选）</span><input name="username" autocomplete="off" maxlength="1024"></label>
+          <label class="fld"><span class="lb">新密码（可选）</span><input name="password" type="password" autocomplete="new-password" maxlength="4096" placeholder="留空保持原密码"></label>
+        </div>
+        <div class="proxy-form-row"><label><input name="enabled" type="checkbox" checked> 启用此槽</label><label><input name="clear_password" type="checkbox"> 明确清除已有密码</label></div>
+        <p class="hint">仅支持 HTTP / HTTPS。私网范围需服务端显式允许；元数据地址始终拒绝。请通过 HTTPS 或受控管理网络传输代理凭据。</p>
+        <div class="proxy-editor-error" id="proxyEditorError" role="alert"></div>
+      </div>
+      <footer><button type="button" id="btnProxyEditorReload">载入最新版本</button><span class="grow"></span><button type="button" id="btnProxyClose">取消</button><button type="submit" class="primary" id="btnProxySave">保存代理槽</button></footer>
+    </form>
   </div>
 </div>
 
