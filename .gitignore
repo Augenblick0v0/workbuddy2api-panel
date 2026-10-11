@@ -40,6 +40,14 @@ docs/
 /login.exe
 /credit.exe
 
+# Account-proxy handoff documents are part of the candidate.
+!docs/
+!docs/proxy-design.md
+!docs/proxy-acceptance.md
+!docs/account-proxy.md
+.playwright-cli/
+output/playwright/
+
 # 本地验证工具（判据逆向过程脚本，结论沉淀于 data/desktop-task-protocol.md）
 /cmd/desktopverify*/
 *.zip

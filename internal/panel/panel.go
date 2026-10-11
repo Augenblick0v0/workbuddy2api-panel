@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/egress"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -33,6 +34,7 @@ import (
 
 // Config 面板依赖（main 装配注入）。
 type Config struct {
+	Egress    *egress.Manager // Account routing and proxy management; nil in legacy tests.
 	Pool      *pool.Pool
 	Upstream  *upstream.Client
 	Scheduler *scheduler.Scheduler // 手动触发签到/保活；nil 时对应接口返回 501
@@ -147,6 +149,7 @@ func New(cfg Config) *Panel {
 func (p *Panel) Logs() *Ring { return p.logs }
 
 func (p *Panel) routes() {
+	p.proxyRoutes()
 	p.mux.HandleFunc("GET /panel/{$}", p.index)
 	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
 	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
