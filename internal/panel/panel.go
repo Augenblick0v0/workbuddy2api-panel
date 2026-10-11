@@ -346,7 +346,7 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 				fetchErrs = append(fetchErrs, "cn: "+err.Error())
 			} else {
 				for _, mi := range infos {
-					out = append(out, panelModelEntry("cn", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.HTTP))
+					out = append(out, panelModelEntry("cn", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.PublicClient()))
 				}
 			}
 		}
@@ -363,7 +363,7 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 				} else {
 					efforts, defaults := p.cfg.Upstream.GlobalEffortSnapshot()
 					for _, mi := range infos {
-						out = append(out, panelModelEntry("global", mi, efforts[mi.ID], defaults[mi.ID], p.cfg.Upstream.HTTP))
+						out = append(out, panelModelEntry("global", mi, efforts[mi.ID], defaults[mi.ID], p.cfg.Upstream.PublicClient()))
 					}
 				}
 			}

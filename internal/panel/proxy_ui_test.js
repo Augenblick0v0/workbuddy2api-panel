@@ -7,6 +7,14 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
 const clone = value => JSON.parse(JSON.stringify(value));
 const fixture = () => ({ revision: 7, slots: [{ id: 'slot-1', name: 'Exit A', enabled: true, scheme: 'http', host: 'proxy.test', port: 8080, username: 'user', has_password: true, transport_generation: 3, binding_count: 1, probe: { ip: '203.0.113.8', status: 'ok', generation: 3, latency_ms: 12, probed_at: new Date().toISOString() } }], accounts: { alice: { assigned: true, slot_id: 'slot-1', orphan: false, route: { state: 'ready' } }, bob: { assigned: false, slot_id: '', orphan: false, route: { state: 'direct' } }, gone: { assigned: true, slot_id: 'slot-1', orphan: true, route: { state: 'disabled' } } } });
+test('failed probe retains last successful IP and time, marked stale separately from latest attempt', () => {
+  const h=harness(),slot=fixture().slots[0];
+  slot.probe.status='error';slot.probe.error_code='proxy_connect_failed';
+  slot.probe.last_success_at='2026-10-10T08:00:00Z';
+  const html=h.ctx.proxyProbeHTML(slot);
+  assert.match(html,/203\.0\.113\.8/);assert.match(html,/proxy_connect_failed/);
+  assert.match(html,/上次成功/);assert.match(html,/最近尝试/);assert.match(html,/已过期/);
+});
 function harness() {
   const elements = new Map(), timers = new Map(), calls = [], confirms = [], storage = [];
   let nextTimer = 0;

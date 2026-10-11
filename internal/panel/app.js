@@ -1158,9 +1158,13 @@ function proxyProbeHTML(slot) {
   const p = slot.probe;
   if (!p) return '<span class="note">尚未检测 · 出口 IP 未知</span>';
   const time = parseAPITime(p.probed_at);
-  const stale = p.generation !== slot.transport_generation || !time || Date.now() - time > 15 * 60 * 1000;
-  return '<span class="tag ' + (p.status === 'ok' ? 'ok' : 'warn') + '">' + esc(p.status === 'ok' ? (p.ip || 'IP 未知') : (p.error_code || p.status)) + '</span>' +
-    '<div class="hint">' + esc(time ? fmtLocalDateTime(time) : '检测时间未知') + ' · ' + esc(p.latency_ms || 0) + ' ms' +
+  const savedSuccess = parseAPITime(p.last_success_at);
+  const success = savedSuccess > 0 ? savedSuccess : (p.status === 'ok' ? time : null);
+  const stale = p.status !== 'ok' || p.generation !== slot.transport_generation || !success || Date.now() - success > 15 * 60 * 1000;
+  return '<span class="tag ' + (p.status === 'ok' ? 'ok' : 'warn') + '">' + esc(p.ip || (p.status === 'ok' ? 'IP 未知' : p.error_code || p.status)) + '</span>' +
+    (p.status !== 'ok' ? '<span class="tag warn">' + esc(p.error_code || p.status) + '</span>' : '') +
+    '<div class="hint">上次成功：' + esc(success ? fmtLocalDateTime(success) : '尚无') +
+    ' · 最近尝试：' + esc(time ? fmtLocalDateTime(time) : '时间未知') + ' · ' + esc(p.latency_ms || 0) + ' ms' +
     (stale ? ' · 结果已过期 / 代际已变，请重测' : '') + '</div>';
 }
 function proxyOptions(selected, includeUnassigned) {

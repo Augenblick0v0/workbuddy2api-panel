@@ -26,7 +26,6 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/egress"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 const (
@@ -463,15 +462,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	}
 	up := p.cfg.Upstream
 	if up != nil && p.cfg.Egress != nil {
-		// Dynamic assertion keeps the OAuth changes independently compilable until
-		// the isolated outbound branch is integrated; no direct fallback is allowed.
-		if pin, ok := any(up).(interface {
-			ForRoute(*egress.RouteHandle) *upstream.Client
-		}); ok {
-			up = pin.ForRoute(sess.route)
-		} else {
-			up = nil
-		}
+		up = up.ForRoute(sess.route)
 	}
 	checkinMsg := ""
 	remain := int64(-1)
@@ -507,8 +498,6 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 				note(err)
 			}
 		}
-	} else if p.cfg.Upstream != nil {
-		checkinMsg = "oauth_route_client_pending"
 	}
 	sess.result = map[string]any{"done": true, "uid": a.UID, "nickname": a.Nickname, "realm": sess.realm, "credits": remain, "credits_total": total, "checkin_message": checkinMsg}
 	sess.credentials = nil

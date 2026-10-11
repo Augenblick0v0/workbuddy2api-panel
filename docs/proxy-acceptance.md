@@ -27,7 +27,7 @@ Status: development incomplete; production not released. T06 requires separate a
 
 ## Final acceptance requirements
 
-T01 and T02 are implemented; T03–T05 remain pending.
+T01–T04 implemented and targeted tests passed; T05 final acceptance in progress.
 No early full test/build, no ordinary-source hash gates, no repeated successful baseline test.
 
 ## T02
@@ -56,3 +56,24 @@ No early full test/build, no ordinary-source hash gates, no repeated successful 
   rename; a post-commit directory-sync error does not report an uncommitted write or leave
   disk/memory inconsistent. Postcommit power-loss durability has this explicit filesystem
   limitation. File-sync/rename failures before commit keep previous disk and snapshot.
+
+## T03 / T04 integrated
+
+- T03 and T04 used separate worktrees; root integrated T03 `5d2cf12` before T04 `e999241`.
+- Root owns OAuth and main/config integration. Auth extension is runtime-only credential
+  epoch plus in-place replacement, preserving identity/path/device and blocking stale refresh
+  writers. Approved bounded session Peek helper preserves blocked sticky failure semantics.
+- Account matrix tests cover25 actual API entrypoints ×A/B counting proxies. Fault tests
+  cover407, disconnected/cut-body proxy, uncertain POST no replay, no account punishment,
+  sticky/fallback filtering, equal/different known-IP WAF, HeaderTimeout each generation,
+  existing SSE surviving edits, public models.dev isolation and redirect rejection.
+- OAuth tests coverstate/token/account + CN checkin/balance under pinned route, single-flight,
+  cached completion, pending/terminal distinction, generation/disabled/cancel, binding-first
+  persistence, both write-failure orderings, preserved credentials before rebind confirmation.
+- UI Node behavior16/16 PASS, JS syntax PASS. Includes stale known IP + successful timestamp
+  distinct from latest attempt, dirty forms, CAS, CRUD/binding/preview/orphan and OAuth races.
+- Integrated prescribed targeted command PASS on Windows Go1.26.5:
+  `go test ./internal/upstream ./internal/panel ./internal/server ./internal/pool ./internal/session ./cmd/server -count=1`
+  upstream1.711s / panel5.998s / server11.406s / pool0.429s / session1.288s / cmd/server2.139s.
+- No full ./... run yet. Linux Go1.23 test/vet/race, candidate build/runtime and real UI
+  screenshots remain required; current state is still development incomplete.
