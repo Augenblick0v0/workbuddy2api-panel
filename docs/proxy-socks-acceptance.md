@@ -1,6 +1,6 @@
 # 2026-10-11 代理诊断与 SOCKS 增量验收
 
-状态：本地候选已实现；生产保持上一版，新增发布需明确批准。真实SOCKS生产地址/账号链未测。
+状态：2026-10-11已获明确批准并部署正式生产；数据保留、健康及现有HTTP代理诊断通过。真实SOCKS生产地址/账号链未测。
 
 ## 现场原因
 
@@ -102,3 +102,21 @@ Panel旧版仅测HTTPS ipify，并将CONNECT非200合并为proxy_connect_failed�
 - 当前结论仍为：**开发完成，生产未发布**。待新版发布明确批准后，
   重新盘点实时生产数据、做一致性备份及恢复校验，再仅切换wb2api；
   真实SOCKS生产验收仍需用户提供有效入口。
+
+## T06正式生产验收（2026-10-11 20:13）
+
+- 用户明确批准部署；生产现运行`workbuddy2api-panel:proxy-socks-20261011-5172fda`，
+  镜像ID仍为上文已验收e03436d1，源码c271a8f（产品5172fda）。
+- 仅切换wb2api；容器healthy、restarts0，公网healthz200，6账号仍健康。
+- 冷备及生产私有目录恢复校验19文件/10JSON与权限属主；账号/token、config、
+  2个现有HTTP槽、0绑定保留，旧数据不覆盖当前文件。同机其他服务身份前后不变。
+- 现有代理现场检测IP39.109.113.97、HTTPS CONNECT400，stage=connect、
+  reason=connect_rejected；只更新观测revision8→9，不改账号路由。
+- 发布备份：
+  `/opt/workbuddy2api-panel-backups/pre-panel-proxy-socks-20261011-201046`。
+- 新回滚入口检查全部槽scheme，包括未绑定的SOCKS槽；先备份最新数据，
+  兼容时只回切镜像/源码/override，不恢复历史token/data。
+- 本轮一名部署专项审查，修正临时排流规则匹配范围；只做部署相关验证，
+  未重复已通过的源码测试、UI验收或E2E。真实SOCKS生产链路仍待入口。
+- 完整发布记录：
+  `D:\codex\.agentdocs\workflow\261011-panel-proxy-diagnostics-socks-release.md`。
