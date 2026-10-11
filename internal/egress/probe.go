@@ -61,6 +61,7 @@ func (m *Manager) Probe(ctx context.Context, id string) (ProbeResult, error) {
 					} else {
 						result.IP = parsed.String()
 						result.Status = "ok"
+						result.SuccessfulAt = result.CheckedAt
 					}
 				}
 			}
@@ -88,6 +89,10 @@ func (m *Manager) Probe(ctx context.Context, id string) (ProbeResult, error) {
 		if result.IP == "" {
 			if old, ok := snap.ProbeResults[id]; ok && old.Generation == h.Generation {
 				result.IP = old.IP
+				result.SuccessfulAt = old.SuccessfulAt
+				if result.SuccessfulAt.IsZero() && old.Status == "ok" {
+					result.SuccessfulAt = old.CheckedAt
+				}
 			}
 		}
 		_, saveErr := m.Update(snap.Revision, func(c *Config) error {

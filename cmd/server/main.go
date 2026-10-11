@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/egress"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -169,6 +170,22 @@ func main() {
 	// 数据目录与 state.json 同风格（Docker volume 持久化路径）。首次缺失/损坏自动
 	// 回落仓库内嵌种子；models.dev 按需拉取成功后原子写回。
 	upstream.SetModelCatalogPath(stateSibling(cfg.StateFile, "model.json"))
+	// Apply timeouts before cloning the transport into egress generations.
+	// Existing but unreadable/corrupt proxies.json is a startup error, not direct.
+	baseTransport, ok := up.HTTP.Transport.(*http.Transport)
+	if !ok {
+		log.Fatal("egress: expected base transport before installation")
+	}
+	eg, err := egress.Open(stateSibling(cfg.StateFile, "proxies.json"), egress.Options{
+		BaseTransport: baseTransport,
+		AllowedCIDRs:  cfg.Egress.AllowedProxyCIDRs,
+	})
+	if err != nil {
+		log.Fatalf("egress startup: %s", err)
+	}
+	up.InstallEgress(eg)
+	p.SetRouteAvailable(eg.Available)
+	defer eg.CloseIdleConnections()
 
 	sch := scheduler.New(scheduler.Config{
 		Pool:           p,
@@ -263,6 +280,7 @@ func main() {
 	}
 
 	pn := panel.New(panel.Config{
+		Egress:      eg,
 		Pool:        p,
 		Usage:       rec,
 		RequestLog:  requestLog,
@@ -534,6 +552,7 @@ func restartRequiredFields(c *Config) []string {
 	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
 	out = append(out, "logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb")
 	out = append(out, "server.read_timeout")
+	out = append(out, "egress.allowed_proxy_cidrs")
 	return out
 }
 

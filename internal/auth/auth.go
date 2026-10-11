@@ -365,15 +365,15 @@ func (a *Auth) SaveAtomic() error {
 func (a *Auth) ReplaceCredentials(candidate *Auth) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if candidate == nil || candidate == a {
+	if candidate == nil || candidate == a || candidate.UID != a.UID || a.FilePath == "" {
 		return fmt.Errorf("invalid credential replacement")
 	}
-	if a.FilePath != "" {
-		candidate.FilePath = a.FilePath
-	}
-	if candidate.DeviceToken == "" {
-		candidate.DeviceToken = a.DeviceToken
-	}
+	// Pool identity fields are immutable and read by existing pool callers
+	// without the credential mutex. Preserve them instead of racing those reads.
+	candidate.FilePath = a.FilePath
+	candidate.DeviceToken = a.DeviceToken
+	candidate.Nickname = a.Nickname
+	candidate.EnterpriseID = a.EnterpriseID
 	if err := candidate.SaveAtomic(); err != nil {
 		return err
 	}
@@ -382,10 +382,6 @@ func (a *Auth) ReplaceCredentials(candidate *Auth) error {
 	a.ExpiresAt = candidate.ExpiresAt
 	a.Domain = candidate.Domain
 	a.realm = candidate.realm
-	a.Nickname = candidate.Nickname
-	a.EnterpriseID = candidate.EnterpriseID
-	a.FilePath = candidate.FilePath
-	a.DeviceToken = candidate.DeviceToken
 	a.CredentialEpoch++
 	return nil
 }

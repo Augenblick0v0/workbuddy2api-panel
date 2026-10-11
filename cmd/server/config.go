@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,6 +22,10 @@ type Config struct {
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
+	Egress    struct {
+		// Explicit private proxy networks only; metadata/link-local stay blocked.
+		AllowedProxyCIDRs []string `json:"allowed_proxy_cidrs"`
+	} `json:"egress"`
 
 	Panel struct {
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
@@ -452,6 +457,11 @@ func applyEnv(c *Config) {
 }
 
 func (c *Config) normalize() error {
+	for _, cidr := range c.Egress.AllowedProxyCIDRs {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			return fmt.Errorf("egress.allowed_proxy_cidrs: invalid CIDR")
+		}
+	}
 	var err error
 	if c.Panel.PackageDetailLimit <= 0 {
 		c.Panel.PackageDetailLimit = 5

@@ -11,16 +11,22 @@ package panel
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/egress"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 const (
@@ -84,211 +90,445 @@ type apiEnvelope struct {
 	Data json.RawMessage `json:"data"`
 }
 
-// doJSON 发一次 JSON 请求并解信封。origin 为 Origin/Referer 基础域（随 realm 切）。
-func doJSON(method, fullURL, bearer string, body io.Reader, origin string) (json.RawMessage, int, error) {
-	req, err := http.NewRequest(method, fullURL, body)
+// loginUpstreamError intentionally does not expose upstream messages or state URLs.
+type loginUpstreamError struct {
+	status, code int
+	pending      bool
+}
+
+func (s *loginSession) stop() {
+	s.cancel()
+	if s.route != nil {
+		s.route.Release()
+	}
+}
+
+func (p *Panel) credentialLock(uid string) *sync.Mutex {
+	p.credentialMu.Lock()
+	defer p.credentialMu.Unlock()
+	if p.credentialLocks == nil {
+		p.credentialLocks = map[string]*sync.Mutex{}
+	}
+	if p.credentialLocks[uid] == nil {
+		p.credentialLocks[uid] = &sync.Mutex{}
+	}
+	return p.credentialLocks[uid]
+}
+
+func (e *loginUpstreamError) Error() string { return "oauth_upstream_failed" }
+
+func (p *Panel) loginEP(realm string) (string, string, string, string) {
+	if p.cfg.LoginEndpoints != nil {
+		return p.cfg.LoginEndpoints(realm)
+	}
+	return loginEndpoints(realm)
+}
+
+func (p *Panel) loginJSON(ctx context.Context, h *egress.RouteHandle, method, fullURL, bearer string, body io.Reader, origin string) (json.RawMessage, error) {
+	req, err := http.NewRequestWithContext(ctx, method, fullURL, body)
 	if err != nil {
-		return nil, 0, err
+		return nil, errors.New("oauth_request_failed")
 	}
 	commonHeaders(req, origin)
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
-	resp, err := loginHTTP.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode >= 300 {
-		return nil, resp.StatusCode, fmt.Errorf("http_error: upstream %d", resp.StatusCode)
-	}
-	var env apiEnvelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, resp.StatusCode, fmt.Errorf("parse failed: %w", err)
-	}
-	if env.Code != 0 {
-		return nil, resp.StatusCode, fmt.Errorf("code=%d msg=%s", env.Code, env.Msg)
-	}
-	return env.Data, resp.StatusCode, nil
-}
-
-// loginStart 发起设备授权：POST auth/state 拿授权 URL。
-// body 可带 {"realm":"global"}（缺省 cn）；state 会话记 realm，poll 同 realm 落盘。
-func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
-	realm := "cn"
-	if r.Body != nil {
-		var reqBody struct {
-			Realm string `json:"realm"`
+	client := loginHTTP
+	if p.cfg.Egress != nil {
+		if err = p.cfg.Egress.CheckCurrent(h); err != nil {
+			return nil, err
 		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<12)).Decode(&reqBody); err == nil {
-			if reqBody.Realm == "global" {
-				realm = "global"
+		req = req.WithContext(egress.WithRoute(req.Context(), h))
+		client = &http.Client{Transport: p.cfg.Egress, Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		if p.cfg.Egress != nil {
+			var changed *egress.EgressError
+			if errors.As(p.cfg.Egress.CheckCurrent(h), &changed) && changed.Code == "oauth_proxy_changed" {
+				return nil, changed
 			}
 		}
+		return nil, err
 	}
-	epState, _, _, origin := loginEndpoints(realm)
-	data, status, err := doJSON(http.MethodPost, epState, "", bytes.NewReader([]byte("{}")), origin)
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if err != nil || len(raw) > 1<<20 {
+		return nil, errors.New("oauth_response_failed")
+	}
+	if resp.StatusCode >= 300 {
+		return nil, &loginUpstreamError{status: resp.StatusCode}
+	}
+	var env apiEnvelope
+	if json.Unmarshal(raw, &env) != nil {
+		return nil, errors.New("oauth_response_failed")
+	}
+	if env.Code != 0 {
+		msg := strings.ToLower(strings.TrimSpace(env.Msg))
+		pending := msg == "login ing" || msg == "pending" || msg == "waiting for login" || msg == "login pending"
+		return nil, &loginUpstreamError{status: resp.StatusCode, code: env.Code, pending: pending}
+	}
+	return env.Data, nil
+}
+
+func (p *Panel) loginAccess(w http.ResponseWriter, r *http.Request) bool {
+	if p.cfg.Egress == nil {
+		return true
+	}
+	allowed := false
+	// OAuth polling writes credentials even though the legacy verb is GET.
+	copyReq := r.Clone(r.Context())
+	copyReq.Method = http.MethodPost
+	p.proxyAdmin(func(http.ResponseWriter, *http.Request) { allowed = true })(w, copyReq)
+	return allowed
+}
+
+func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
+	if !p.loginAccess(w, r) {
+		return
+	}
+	var in struct {
+		Realm   string `json:"realm"`
+		SlotID  string `json:"proxy_slot_id"`
+		Confirm bool   `json:"confirm_rebind"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&in); err != nil && err != io.EOF {
+			proxyError(w, 400, "invalid_login_request")
+			return
+		}
+	}
+	realm := "cn"
+	if in.Realm == "global" {
+		realm = "global"
+	}
+	var h *egress.RouteHandle
+	if p.cfg.Egress != nil {
+		var err error
+		h, err = p.cfg.Egress.ResolveSlot(in.SlotID)
+		if err != nil {
+			proxyFailure(w, err)
+			return
+		}
+	}
+	keep := false
+	defer func() {
+		if !keep && h != nil {
+			h.Release()
+		}
+	}()
+	ep, _, _, origin := p.loginEP(realm)
+	data, err := p.loginJSON(r.Context(), h, http.MethodPost, ep, "", bytes.NewReader([]byte("{}")), origin)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, fmt.Sprintf("auth state (upstream %d): %v", status, err))
+		p.loginFailure(w, err)
 		return
 	}
 	var st struct {
 		State   string `json:"state"`
 		AuthURL string `json:"authUrl"`
 	}
-	if err := json.Unmarshal(data, &st); err != nil || st.State == "" || st.AuthURL == "" {
-		writeErr(w, http.StatusBadGateway, "auth state: missing state or authUrl")
+	if json.Unmarshal(data, &st) != nil || st.State == "" || len(st.State) > 4096 {
+		proxyError(w, 502, "oauth_state_failed")
 		return
 	}
+	u, err := url.Parse(st.AuthURL)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		proxyError(w, 502, "oauth_url_failed")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), loginTTL)
+	sess := &loginSession{created: time.Now(), realm: realm, ctx: ctx, cancel: cancel, route: h, confirmRebind: in.Confirm}
+	if h != nil {
+		context.AfterFunc(ctx, h.Release)
+	}
 	p.loginMu.Lock()
-	// 顺手回收过期会话，防"开弹窗走开"的 state 滞留。
-	for s, sess := range p.logins {
-		if time.Since(sess.created) > loginTTL {
-			delete(p.logins, s)
+	for state, old := range p.logins {
+		if time.Since(old.created) > loginTTL {
+			old.stop()
+			delete(p.logins, state)
 		}
 	}
-	p.logins[st.State] = loginSession{created: time.Now(), realm: realm}
+	if len(p.logins) >= 1024 {
+		p.loginMu.Unlock()
+		cancel()
+		proxyError(w, 503, "oauth_session_limit")
+		return
+	}
+	if old := p.logins[st.State]; old != nil {
+		p.loginMu.Unlock()
+		cancel()
+		proxyError(w, 502, "oauth_state_collision")
+		return
+	}
+	p.logins[st.State] = sess
 	p.loginMu.Unlock()
-	log.Printf("panel: 发起 OAuth 添加账号 realm=%s（state=%s...）", realm, st.State[:min(8, len(st.State))])
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": st.AuthURL, "state": st.State, "realm": realm})
+	keep = true
+	log.Printf("panel: OAuth started realm=%s", realm)
+	writeJSON(w, 200, map[string]any{"ok": true, "url": st.AuthURL, "state": st.State, "realm": realm, "proxy_slot_id": in.SlotID})
 }
 
-// loginPoll 轮询登录态。未完成 → {done:false}；完成 → 建凭证、落盘、热加载、签到。
+func (p *Panel) loginFailure(w http.ResponseWriter, err error) {
+	var ee *egress.EgressError
+	if errors.As(err, &ee) {
+		proxyFailure(w, err)
+		return
+	}
+	proxyError(w, 502, "oauth_upstream_failed")
+}
+
 func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
+	if !p.loginAccess(w, r) {
+		return
+	}
 	state := r.URL.Query().Get("state")
-	if state == "" {
-		writeErr(w, http.StatusBadRequest, "missing state")
-		return
-	}
 	p.loginMu.Lock()
-	sess, known := p.logins[state]
+	sess := p.logins[state]
 	p.loginMu.Unlock()
-	if !known {
-		writeErr(w, http.StatusNotFound, "unknown or expired state（请重新发起添加账号）")
+	if state == "" {
+		proxyError(w, 400, "missing_state")
 		return
 	}
-	_, epToken, epAcct, origin := loginEndpoints(sess.realm)
-
-	// auth/token 是权威登录状态端点：pending 时业务 code 非 0（"login ing"）。
-	tokRaw, _, err := doJSON(http.MethodGet, epToken+state, "", nil, origin)
-	if err != nil {
-		// pending / 未完成：面板前端继续轮询。
-		writeJSON(w, http.StatusOK, map[string]any{"done": false, "message": err.Error()})
+	if sess == nil {
+		proxyError(w, 404, "oauth_unknown_state")
 		return
 	}
-	var tok struct {
-		AccessToken  string `json:"accessToken"`
-		RefreshToken string `json:"refreshToken"`
-		ExpiresIn    int64  `json:"expiresIn"`
-		Domain       string `json:"domain"`
-	}
-	if err := json.Unmarshal(tokRaw, &tok); err != nil || tok.AccessToken == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"done": false, "message": "waiting for login"})
+	if !sess.mu.TryLock() {
+		writeJSON(w, 200, map[string]any{"done": false, "message": "poll_in_progress"})
 		return
 	}
-
-	// 完成：取 uid/nickname（失败不阻塞，仅缺展示名）。
-	var acct struct {
-		UID          string `json:"uid"`
-		EnterpriseID string `json:"enterpriseId"`
-		Nickname     string `json:"nickname"`
-	}
-	if acctRaw, _, err := doJSON(http.MethodGet, epAcct+state, tok.AccessToken, nil, origin); err == nil {
-		_ = json.Unmarshal(acctRaw, &acct)
-	}
-	if acct.UID == "" {
-		writeErr(w, http.StatusBadGateway, "login done but no uid（token 已发但账号信息获取失败，请重试）")
+	defer sess.mu.Unlock()
+	if sess.result != nil {
+		writeJSON(w, 200, sess.result)
 		return
 	}
-	// UID 来自上游响应，未经校验就用于拼文件名会被路径穿越利用
-	// （filepath.Join("./auths", "workbuddy-../../evil.json") → auths/evil.json）。
-	// UID 是腾讯侧账号标识，实测为 UUID（十六进制与连字符），故只放行 [A-Za-z0-9_-]。
-	if !validUID(acct.UID) {
-		writeErr(w, http.StatusBadGateway, "上游返回的 uid 含非法字符，拒绝落盘（防路径穿越）")
+	if sess.stopped != "" {
+		proxyError(w, 409, sess.stopped)
 		return
 	}
-
-	// 凭证落盘（嵌套形，与 auths/ 目录既有格式一致）→ 热加载进池。
-	if err := os.MkdirAll(p.cfg.AuthDir, 0o755); err != nil {
-		writeErr(w, http.StatusInternalServerError, "mkdir auth dir: "+err.Error())
+	terminal := func(code string) { sess.stopped = code; sess.stop() }
+	if sess.ctx.Err() != nil {
+		terminal("oauth_expired")
+		proxyError(w, 409, "oauth_expired")
 		return
 	}
-	a := &auth.Auth{
-		AccessToken:  tok.AccessToken,
-		RefreshToken: tok.RefreshToken,
-		ExpiresAt:    time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second).Unix(),
-		Domain:       tok.Domain,
-		UID:          acct.UID,
-		EnterpriseID: acct.EnterpriseID,
-		Nickname:     acct.Nickname,
-		FilePath:     filepath.Join(p.cfg.AuthDir, fmt.Sprintf("workbuddy-%s.json", acct.UID)),
-	}
-	// global 登录：落盘 auth.realm=global（Realm() 按此判域；不写则依赖 domain 后缀回落）。
-	if sess.realm == "global" {
-		if _, err := auth.BackfillRealmFor(a, "global"); err != nil {
-			writeErr(w, http.StatusInternalServerError, "set realm: "+err.Error())
+	ctx, cancel := context.WithCancel(r.Context())
+	stop := context.AfterFunc(sess.ctx, cancel)
+	defer cancel()
+	defer stop()
+	if p.cfg.Egress != nil {
+		if err := p.cfg.Egress.CheckCurrent(sess.route); err != nil {
+			terminal("oauth_proxy_changed")
+			p.loginFailure(w, err)
 			return
 		}
-	} else {
-		// CN 也显式补 realm 键（幂等），让 auth 文件形态统一（与 LoadDir 存量迁移对齐）。
-		_, _ = a.BackfillRealm()
 	}
-	if err := a.SaveAtomic(); err != nil {
-		writeErr(w, http.StatusInternalServerError, "save auth: "+err.Error())
+	_, epToken, epAcct, origin := p.loginEP(sess.realm)
+	if sess.credentials == nil {
+		raw, err := p.loginJSON(ctx, sess.route, http.MethodGet, epToken+url.QueryEscape(state), "", nil, origin)
+		if err != nil {
+			var oe *loginUpstreamError
+			if errors.As(err, &oe) && oe.pending {
+				writeJSON(w, 200, map[string]any{"done": false, "message": "waiting_for_login"})
+				return
+			}
+			terminal("oauth_terminal_error")
+			p.loginFailure(w, err)
+			return
+		}
+		var tok struct {
+			AccessToken  string `json:"accessToken"`
+			RefreshToken string `json:"refreshToken"`
+			ExpiresIn    int64  `json:"expiresIn"`
+			Domain       string `json:"domain"`
+		}
+		if json.Unmarshal(raw, &tok) != nil || tok.AccessToken == "" {
+			terminal("oauth_token_failed")
+			proxyError(w, 502, "oauth_token_failed")
+			return
+		}
+		raw, err = p.loginJSON(ctx, sess.route, http.MethodGet, epAcct+url.QueryEscape(state), tok.AccessToken, nil, origin)
+		if err != nil {
+			terminal("oauth_terminal_error")
+			p.loginFailure(w, err)
+			return
+		}
+		var acct struct {
+			UID          string `json:"uid"`
+			Nickname     string `json:"nickname"`
+			EnterpriseID string `json:"enterpriseId"`
+		}
+		if json.Unmarshal(raw, &acct) != nil || !validUID(acct.UID) {
+			terminal("oauth_account_failed")
+			proxyError(w, 502, "oauth_account_failed")
+			return
+		}
+		if tok.ExpiresIn <= 0 || tok.ExpiresIn > 10*365*86400 {
+			tok.ExpiresIn = 3600
+		}
+		a := &auth.Auth{AccessToken: tok.AccessToken, RefreshToken: tok.RefreshToken, ExpiresAt: time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second).Unix(), Domain: tok.Domain, UID: acct.UID, Nickname: acct.Nickname, EnterpriseID: acct.EnterpriseID, FilePath: filepath.Join(p.cfg.AuthDir, "workbuddy-"+acct.UID+".json")}
+		if _, err = auth.BackfillRealmFor(a, sess.realm); err != nil {
+			terminal("oauth_account_failed")
+			proxyError(w, 502, "oauth_account_failed")
+			return
+		}
+		sess.credentials = a
+	}
+	a := sess.credentials
+	uidLock := p.credentialLock(a.UID)
+	uidLock.Lock()
+	defer uidLock.Unlock()
+	var existing *auth.Auth
+	if p.cfg.Pool != nil {
+		existing = p.cfg.Pool.AuthByUID(a.UID)
+	}
+	confirm := sess.confirmRebind || r.URL.Query().Get("confirm_rebind") == "true"
+	if p.cfg.Egress != nil {
+		if err := p.cfg.Egress.CheckCurrent(sess.route); err != nil {
+			terminal("oauth_proxy_changed")
+			p.loginFailure(w, err)
+			return
+		}
+		// One CAS transaction checks the pinned generation and persists binding before
+		// any credential write or Pool.Add. Never invoke Manager methods inside edit.
+		for {
+			snap := p.cfg.Egress.Snapshot()
+			prior, assigned := snap.Bindings[a.UID]
+			if (assigned || existing != nil) && prior != sess.route.SlotID && !confirm {
+				proxyError(w, 409, "oauth_rebind_required")
+				return
+			}
+			_, err := p.cfg.Egress.Update(snap.Revision, func(c *egress.Config) error {
+				if sess.route.SlotID != "" {
+					slot, ok := c.Slots[sess.route.SlotID]
+					if !ok || !slot.Enabled || slot.TransportGeneration != sess.route.Generation {
+						return &egress.EgressError{Code: "oauth_proxy_changed", SlotID: sess.route.SlotID, Stage: "oauth_bind"}
+					}
+				}
+				old, exists := c.Bindings[a.UID]
+				if (exists || existing != nil) && old != sess.route.SlotID && !confirm {
+					return &egress.EgressError{Code: "oauth_rebind_required", Stage: "oauth_bind"}
+				}
+				c.Bindings[a.UID] = sess.route.SlotID
+				return nil
+			})
+			var ee *egress.EgressError
+			if errors.As(err, &ee) && ee.Code == "revision_conflict" {
+				continue
+			}
+			if err != nil {
+				terminal("oauth_binding_failed")
+				p.loginFailure(w, err)
+				return
+			}
+			break
+		}
+	}
+	if ctx.Err() != nil {
+		terminal("oauth_cancelled")
+		proxyError(w, 409, "oauth_cancelled")
 		return
 	}
-	p.cfg.Pool.Add(a)
-	p.cfg.Pool.Revive(acct.UID) // 全新登录 = 人工恢复口径：清掉旧号遗留的禁用/冷却/熔断
-
-	// 顺带签到 + 余额刷新（幂等；失败不影响登录结果，只体现在返回字段里）。
-	// realm 分支：CN 走 DailyCheckin；global 无 CN 签到体系，改为注册激活 + trial 领取
-	// （D4 门控同 scheduler：CN 任务端点对 global 不发起任何调用）。
+	if p.cfg.Egress != nil {
+		if err := p.cfg.Egress.CheckCurrent(sess.route); err != nil {
+			terminal("oauth_proxy_changed")
+			p.loginFailure(w, err)
+			return
+		}
+	}
+	if err := os.MkdirAll(p.cfg.AuthDir, 0700); err != nil {
+		terminal("oauth_credentials_failed")
+		proxyError(w, 500, "oauth_credentials_failed")
+		return
+	}
+	if existing != nil {
+		if err := existing.ReplaceCredentials(a); err != nil {
+			terminal("oauth_credentials_failed")
+			proxyError(w, 500, "oauth_credentials_failed")
+			return
+		}
+		a = existing
+	} else if err := a.SaveAtomic(); err != nil {
+		terminal("oauth_credentials_failed")
+		proxyError(w, 500, "oauth_credentials_failed")
+		return
+	}
+	if p.cfg.Pool != nil {
+		p.cfg.Pool.Add(a)
+		p.cfg.Pool.Revive(a.UID)
+	}
+	up := p.cfg.Upstream
+	if up != nil && p.cfg.Egress != nil {
+		// Dynamic assertion keeps the OAuth changes independently compilable until
+		// the isolated outbound branch is integrated; no direct fallback is allowed.
+		if pin, ok := any(up).(interface {
+			ForRoute(*egress.RouteHandle) *upstream.Client
+		}); ok {
+			up = pin.ForRoute(sess.route)
+		} else {
+			up = nil
+		}
+	}
 	checkinMsg := ""
 	remain := int64(-1)
 	total := int64(0)
-	if sess.realm == "global" {
-		// 注册激活（幂等）：region required 时自动补地区（白名单首个，HK）后重新激活。
-		// 失败不阻断登录结果（auth 已落盘），只在返回字段里体现。
-		if activated, err := p.cfg.Upstream.GlobalCompleteRegistration(a); err != nil {
-			checkinMsg = "注册激活失败: " + err.Error()
-			log.Printf("panel: global 注册激活 uid=%s: %v", acct.UID, err)
-		} else if activated {
-			log.Printf("panel: global 注册激活 uid=%s 完成", acct.UID)
+	if up != nil {
+		stopped := false
+		note := func(err error) {
+			if err != nil {
+				checkinMsg = joinMsg(checkinMsg, err.Error())
+				var ee *egress.EgressError
+				if errors.As(err, &ee) {
+					stopped = true
+				}
+			}
 		}
-		// trial 加油包（幂等 14051 = 已领过，非错误）。
-		if claimed, err := p.cfg.Upstream.ClaimTrial(a); err != nil {
-			checkinMsg = joinMsg(checkinMsg, "trial 领取失败: "+err.Error())
-			log.Printf("panel: global trial uid=%s: %v", acct.UID, err)
-		} else if claimed {
-			log.Printf("panel: global trial uid=%s 已领", acct.UID)
+		if sess.realm == "global" {
+			_, err := up.GlobalCompleteRegistration(a)
+			note(err)
+			if !stopped {
+				_, err = up.ClaimTrial(a)
+				note(err)
+			}
+		} else if !a.IsEnterprise() {
+			note(up.DailyCheckin(a))
 		}
-	} else if !a.IsEnterprise() {
-		// 企业版跳过签到：上游 POST /v2/billing/meter/daily-checkin 对企业号
-		// 400 code 10001「企业账号不支持该操作」，发了只会把该错误写进登录返回。
-		// 下方 UserResource 余额查询照常（企业额度走 get-enterprise-user-usage 口径）。
-		if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
-			checkinMsg = err.Error()
+		if !stopped {
+			if rm, tt, err := up.UserResource(a); err == nil {
+				remain, total = rm, tt
+				if p.cfg.Pool != nil {
+					p.cfg.Pool.ReenableIfCredits(a.UID, rm, tt)
+				}
+			} else {
+				note(err)
+			}
 		}
+	} else if p.cfg.Upstream != nil {
+		checkinMsg = "oauth_route_client_pending"
 	}
-	if rm, tt, err := p.cfg.Upstream.UserResource(a); err == nil {
-		remain, total = rm, tt
-		p.cfg.Pool.ReenableIfCredits(acct.UID, rm, tt)
-	}
+	sess.result = map[string]any{"done": true, "uid": a.UID, "nickname": a.Nickname, "realm": sess.realm, "credits": remain, "credits_total": total, "checkin_message": checkinMsg}
+	sess.stop()
+	log.Printf("panel: OAuth account loaded uid=%s realm=%s", a.UID, sess.realm)
+	writeJSON(w, 200, sess.result)
+}
 
+func (p *Panel) loginCancel(w http.ResponseWriter, r *http.Request) {
+	if !p.loginAccess(w, r) {
+		return
+	}
+	var in struct {
+		State string `json:"state"`
+	}
+	if !proxyDecode(w, r, &in) {
+		return
+	}
 	p.loginMu.Lock()
-	delete(p.logins, state)
+	sess := p.logins[in.State]
+	delete(p.logins, in.State)
 	p.loginMu.Unlock()
-	log.Printf("panel: 新账号已热加载 uid=%s nickname=%q realm=%s（免重启生效）", acct.UID, acct.Nickname, sess.realm)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"done":            true,
-		"uid":             acct.UID,
-		"nickname":        acct.Nickname,
-		"realm":           sess.realm,
-		"credits":         remain,
-		"credits_total":   total,
-		"checkin_message": checkinMsg,
-	})
+	if sess != nil {
+		sess.stop()
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 // joinMsg 拼接 login 完成后的提示消息（多段用「；」连接，空段跳过）。

@@ -45,6 +45,14 @@
 
 ## 项目简介
 
+### 账号固定出站代理（开发候选）
+
+新增 HTTP/HTTPS 代理槽、固定账号绑定、服务端 OAuth 固定出口和故障停止。
+代理故障不直连；旧数据/冷却/用量保持独立。使用与回滚边界见
+[账号代理说明](docs/account-proxy.md)，验证状态见[开发证据](docs/proxy-acceptance.md)。
+独立 CLI/脚本不继承绑定，绑定后请通过常驻 Panel 服务维护。
+此候选尚未获生产发布批准。
+
 WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾讯 CodeBuddy（`copilot.tencent.com`）账号包装为统一的 `/v1/chat/completions` 服务。
 
 - 官方不提供 OpenAI 形态的开放 API，本项目通过 **OAuth 设备授权**（面板「添加账号」或 `login.sh`）获取账号凭证，在网关侧做 token 自动刷新、账号池调度与流量治理；

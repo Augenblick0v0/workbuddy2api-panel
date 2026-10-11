@@ -2,6 +2,11 @@ auths/
 data/
 *.tmp
 .git/
+.git
+.playwright-cli/
+output/playwright/
+*.exe
+*.zip
 .gitignore
 docs/
 scripts/__pycache__/

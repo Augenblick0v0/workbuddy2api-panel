@@ -26,13 +26,14 @@ type Slot struct {
 	TransportGeneration uint64 `json:"transport_generation"`
 }
 type ProbeResult struct {
-	SlotID     string    `json:"slot_id"`
-	Generation uint64    `json:"generation"`
-	IP         string    `json:"ip,omitempty"`
-	LatencyMS  int64     `json:"latency_ms"`
-	CheckedAt  time.Time `json:"probed_at"`
-	Status     string    `json:"status"`
-	ErrorCode  string    `json:"error_code,omitempty"`
+	SlotID       string    `json:"slot_id"`
+	Generation   uint64    `json:"generation"`
+	IP           string    `json:"ip,omitempty"`
+	LatencyMS    int64     `json:"latency_ms"`
+	CheckedAt    time.Time `json:"probed_at"`
+	SuccessfulAt time.Time `json:"last_success_at,omitempty"`
+	Status       string    `json:"status"`
+	ErrorCode    string    `json:"error_code,omitempty"`
 }
 type Config struct {
 	SchemaVersion int                        `json:"schema_version"`

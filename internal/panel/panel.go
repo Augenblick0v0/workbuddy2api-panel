@@ -11,6 +11,7 @@
 package panel
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -34,14 +35,16 @@ import (
 
 // Config 面板依赖（main 装配注入）。
 type Config struct {
-	Egress    *egress.Manager // Account routing and proxy management; nil in legacy tests.
-	Pool      *pool.Pool
-	Upstream  *upstream.Client
-	Scheduler *scheduler.Scheduler // 手动触发签到/保活；nil 时对应接口返回 501
-	AuthDir   string               // OAuth 登录完成后凭证落盘目录
-	APIKey    string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
-	RedisMode string               // "upstash" / "noop"，仅观测透出
-	Version   string               // 面板版本号（展示用）
+	Egress *egress.Manager // Account routing and proxy management; nil in legacy tests.
+	// LoginEndpoints is a fixture seam, never populated from management requests.
+	LoginEndpoints func(string) (string, string, string, string)
+	Pool           *pool.Pool
+	Upstream       *upstream.Client
+	Scheduler      *scheduler.Scheduler // 手动触发签到/保活；nil 时对应接口返回 501
+	AuthDir        string               // OAuth 登录完成后凭证落盘目录
+	APIKey         string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
+	RedisMode      string               // "upstash" / "noop"，仅观测透出
+	Version        string               // 面板版本号（展示用）
 
 	// Live 运行期可变配置（在线改配置立即生效）。
 	Live *livecfg.Holder
@@ -79,8 +82,10 @@ type Panel struct {
 
 	// logins 进行中的 OAuth 设备授权会话（state → 会话信息）。
 	// poll 成功或超时（loginTTL）后剔除；面板常驻进程，容量天然有界。
-	loginMu sync.Mutex
-	logins  map[string]loginSession
+	loginMu         sync.Mutex
+	logins          map[string]*loginSession
+	credentialMu    sync.Mutex
+	credentialLocks map[string]*sync.Mutex
 
 	// taskMu/taskLocks 一键完成任务的 per-account 互斥：同一账号的任务动作
 	// （单任务 / 全量）同时只允许一条在跑。重复点击直接返回 409"仍在执行"，
@@ -125,8 +130,16 @@ const loginTTL = 15 * time.Minute
 
 // loginSession 进行中的 OAuth 会话：创建时刻 + realm（cn/global，用于落盘与端点切换）。
 type loginSession struct {
-	created time.Time
-	realm   string // "cn" / "global"，缺省 cn
+	created       time.Time
+	realm         string // "cn" / "global"，缺省 cn
+	mu            sync.Mutex
+	ctx           context.Context
+	cancel        context.CancelFunc
+	route         *egress.RouteHandle
+	confirmRebind bool
+	result        map[string]any
+	stopped       string
+	credentials   *auth.Auth
 }
 
 // New 构建面板。
@@ -139,7 +152,7 @@ func New(cfg Config) *Panel {
 		mux:     http.NewServeMux(),
 		started: time.Now(),
 		logs:    NewRing(500),
-		logins:  map[string]loginSession{},
+		logins:  map[string]*loginSession{},
 	}
 	p.routes()
 	return p
@@ -160,6 +173,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/login/start", p.withAuth(p.loginStart))
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
 	p.mux.HandleFunc("GET /panel/api/login/regions", p.withAuth(p.loginRegions))
+	p.mux.HandleFunc("POST /panel/api/login/cancel", p.withAuth(p.loginCancel))
 	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.withAuth(p.importCockpit))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))

@@ -58,6 +58,28 @@ func TestProxyProbeWAFIsolation(t *testing.T) {
 		t.Fatal("probe request count")
 	}
 }
+
+func TestProxyProbeFailureRetainsSuccessTime(t *testing.T) {
+	var fail atomic.Bool
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail.Load() {
+			w.WriteHeader(500)
+			return
+		}
+		w.Write([]byte(`{"ip":"203.0.113.9"}`))
+	}))
+	defer proxy.Close()
+	m := managerWithSlot(t, slotFor(t, proxy.URL), egress.Options{AllowedCIDRs: []string{"127.0.0.0/8"}, ProbeURL: "http://probe.invalid/ip"})
+	first, err := m.Probe(context.Background(), "slot-1")
+	if err != nil || first.SuccessfulAt.IsZero() {
+		t.Fatal(first, err)
+	}
+	fail.Store(true)
+	last, err := m.Probe(context.Background(), "slot-1")
+	if err == nil || last.IP != "203.0.113.9" || !last.SuccessfulAt.Equal(first.SuccessfulAt) || last.Status != "error" {
+		t.Fatal("last successful evidence lost", last, err)
+	}
+}
 func TestProxyProbeBounds(t *testing.T) {
 	var redirected atomic.Int64
 	dst := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { redirected.Add(1) }))
