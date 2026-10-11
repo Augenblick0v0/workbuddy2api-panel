@@ -86,4 +86,3 @@ try {
   & docker network rm $network 2>&1|Out-Null
   & docker volume rm $volume 2>&1|Out-Null
 }
-
