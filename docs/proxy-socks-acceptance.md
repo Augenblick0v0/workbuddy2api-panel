@@ -1,6 +1,6 @@
 # 2026-10-11 代理诊断与 SOCKS 增量验收
 
-状态：2026-10-11已获明确批准并部署SOCKS版本及后续“探针误拦截积分查询”修复；当前HTTP入口实际CONNECT400仍存在，积分未恢复成功。真实SOCKS生产账号链未专项验收。
+状态：2026-10-11已部署SOCKS、探针告警及15秒暂态故障恢复修复；两个实际SOCKS槽积分查询成功，其中一个自然超时后无需Probe恢复成功。未绑定HTTP入口的CONNECT400问题独立存在。
 
 ## 现场原因
 
@@ -181,3 +181,13 @@ Panel旧版仅测HTTPS ipify，并将CONNECT非200合并为proxy_connect_failed�
 - UI仅状态标签/说明变更，无布局变化；以新增行为测试确认冷却期限和无需手动解锁，
   复用上一版本真实Chrome桌面/手机布局验收，不重复浏览器流程。
 - 日志位于`output/playwright/failure-recovery-*`；正式发布结果另行追加。
+
+### 故障恢复修复正式发布（2026-10-11 22:05）
+- 生产6024906、镜像168c4436；健康/restarts0、公网healthz200。
+- 提前准备所有制品后快速冷备/切换，准入排流窗口3.795秒，备份恢复19文件/10JSON通过；
+  6账号、4槽、5绑定及最新持久数据保留，其他服务未操作。
+- 备份：/opt/workbuddy2api-panel-backups/pre-panel-proxy-recovery-20261011-220355。
+- 不点Probe直接查询：slot-3积分200；slot-4第一次自然proxy_timeout、RetryAfter15，
+  冷却后新一次请求200，全程没有出口检测解锁，slots/bindings/probe_results保持。
+- 进程内sticky会话因服务重启重新建立，账号绑定等持久数据保留；未清除账号冷却/WAF保护。
+- 正式记录：D:\codex\.agentdocs\workflow\261011-panel-proxy-failure-recovery-release.md。
