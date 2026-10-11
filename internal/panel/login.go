@@ -377,6 +377,11 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	uidLock := p.credentialLock(a.UID)
 	uidLock.Lock()
 	defer uidLock.Unlock()
+	if ctx.Err() != nil {
+		terminal("oauth_cancelled")
+		proxyError(w, 409, "oauth_cancelled")
+		return
+	}
 	var existing *auth.Auth
 	if p.cfg.Pool != nil {
 		existing = p.cfg.Pool.AuthByUID(a.UID)
@@ -506,6 +511,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		checkinMsg = "oauth_route_client_pending"
 	}
 	sess.result = map[string]any{"done": true, "uid": a.UID, "nickname": a.Nickname, "realm": sess.realm, "credits": remain, "credits_total": total, "checkin_message": checkinMsg}
+	sess.credentials = nil
 	sess.stop()
 	log.Printf("panel: OAuth account loaded uid=%s realm=%s", a.UID, sess.realm)
 	writeJSON(w, 200, sess.result)
