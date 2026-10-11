@@ -51,7 +51,7 @@
 代理故障不直连；旧数据/冷却/用量保持独立。使用与回滚边界见
 [账号代理说明](docs/account-proxy.md)，验证状态见[开发证据](docs/proxy-acceptance.md)。
 独立 CLI/脚本不继承绑定，绑定后请通过常驻 Panel 服务维护。
-此候选尚未获生产发布批准。
+2026-10-11 已获批准发布正式生产；代理配置初始为空，既有账号出口和数据保持原样。
 
 WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾讯 CodeBuddy（`copilot.tencent.com`）账号包装为统一的 `/v1/chat/completions` 服务。
 

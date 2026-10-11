@@ -1,7 +1,7 @@
 # Development evidence
 
-Status: **开发完成，生产未发布**. T01–T05 passed on2026-10-11 Asia/Hong_Kong.
-T06 requires separate approval; T07 deferred.
+Status: **已于2026-10-11发布正式生产（空代理配置）**. T01–T05 passed.
+T06 deployment approved/completed; real proxy/OAuth activation verification awaits configuration. T07 deferred.
 
 ## T01 — 2026-10-11 Asia/Hong_Kong
 
@@ -171,3 +171,17 @@ management-entry isolation and approved release/rollback exercise remain T06 gat
 Single-process writes only; post-rename directory fsync is best-effort as documented.
 CLI/SOCKS/discovery remain T07 deferred. Do not run no-proxy old binaries against bound
 accounts; preserve latest tokens/data on any future release rollback.
+
+## T06 — approved production deployment, 2026-10-11
+
+- User approved deployment with all previous service data preserved and backups.
+- Production remains `/opt/workbuddy2api-panel` on38.76.170.41, port7863; only wb2api replaced.
+- Reused exact tested image059b05991cf3; production branch`release/panel-proxy-20261011-193819`, HEAD2a682b3. No production build/dependency upgrade.
+- Stopped-service cold backup and restore check passed:17files/9JSON. Six auth files and config.json byte-identical with ownership/mode preserved; counters25955success/1error unchanged, six healthy accounts, cooldown/disabled/paused0.
+- Backup `/opt/workbuddy2api-panel-backups/pre-panel-proxy-20261011-193819/`: old image, tracked source, complete auths/data/config/Compose, private manifests. No production credentials copied to local tests.
+- New proxies.json0600,10001:10001,revision0,slots0,bindings0. Existing exits and scheduler switches unchanged.
+- Local/public health200, authorized new proxy API200, anonymous401; running/healthy/restarts0. Other Docker IDs and Sub2API process/restarts unchanged. Temporary7863 drain rules removed.
+- Old-image archive reload, data restore and bound-account rollback rejection verified. Guarded rollback preserves latest data. No extra production restart/rollback rehearsal.
+- Real proxy/OAuth not exercised: this request deploys capability only. No production chat/register/credit-spending test. Use SSH tunnel/HTTPS for proxy credentials.
+- Detailed record:`D:\codex\.agentdocs\workflow\261011-panel-account-proxy-release.md`; server handoff:`/opt/workbuddy2api-panel-releases/panel-proxy-20261011-193819/DEPLOYMENT.md`.
+- Reused T05 checks; no unchanged full tests/build/race rerun. Hashes used only for artifact transfer and backup/data integrity.
