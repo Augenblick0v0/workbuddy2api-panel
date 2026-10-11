@@ -27,6 +27,7 @@ type Config struct {
     NextSlotSeq uint64 `json:"next_slot_seq"`
     Slots map[string]Slot `json:"slots"`
     Bindings map[string]string `json:"bindings"`
+    PendingAccounts map[string]bool `json:"pending_accounts,omitempty"`
     ProbeResults map[string]ProbeResult `json:"probe_results"`
 }
 // Slot: ID, Name, Enabled, Scheme, Host, Port, Username, Password, TransportGeneration.
@@ -45,6 +46,7 @@ func (m *Manager) Available(uid string) bool // memory-only; no I/O
 func (m *Manager) Status(uid string) RouteStatus
 func (m *Manager) CheckCurrent(h *RouteHandle) error // OAuth slot/generation check
 func (m *Manager) BlockWAF(routeKey string, until time.Time)
+func (m *Manager) CanonicalRouteKey(routeKey string) string
 func (m *Manager) Probe(ctx context.Context, id string) (ProbeResult, error)
 func (m *Manager) RoundTrip(req *http.Request) (*http.Response, error)
 func (m *Manager) CloseIdleConnections()
@@ -76,6 +78,16 @@ Private CIDR allow-list is startup configuration, never supplied by arbitrary ma
 Additional test-only options: Resolver and StoreHooks (Sync/Rename); none exposed by HTTP.
 Manager.InUse guards OAuth slot deletion; Update performs this guard atomically itself,
 so edit callbacks must not call Manager methods. Status/Available use atomic snapshots.
+PendingAccounts is a durable credential-transition guard: OAuth sets it with binding,
+clears it only after successful credential persistence and matching final route commit.
+Existing and new UIDs remain blocked across restart on failure; even an account handle
+resolved before the guard is rechecked at RoundTrip. Pre-identity ResolveSlot handles remain
+separate for OAuth. A pending route returns503 `proxy_account_transition`.
+CanonicalRouteKey merges unknown same-generation slot keys into newly learned IP buckets;
+historical known IPs and retired generations never alias onto an unrelated new exit.
+The refresh credential epoch suppresses both stale successful writes and stale failure
+responses after re-login. Existing idempotent billing retries retain one pinned route;
+confirmed upstream500 policy stays intact, uncertain transport/body errors never replay.
 
 ## Outbound inventory
 
