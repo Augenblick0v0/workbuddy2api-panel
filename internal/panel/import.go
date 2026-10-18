@@ -77,7 +77,7 @@ func decodeImportAccounts(raw []byte) ([]cockpitAccount, error) {
 			}
 			acc = cockpitAccount{UID: a.UID, Nickname: a.Nickname, AccessToken: a.AccessToken,
 				RefreshToken: a.RefreshToken, ExpiresAt: a.ExpiresAt, Domain: a.Domain,
-				Realm: a.Realm(), EnterpriseID: a.EnterpriseID, DeviceToken: a.DeviceToken}
+				Realm: auth.ResolveRealm(a.RealmStored(), a.Domain), EnterpriseID: a.EnterpriseID, DeviceToken: a.DeviceToken}
 		} else {
 			if _, ok := fields["access_token"]; !ok {
 				return nil, fmt.Errorf("account #%d: expected cockpit credentials or WorkBuddy account/auth export", i+1)

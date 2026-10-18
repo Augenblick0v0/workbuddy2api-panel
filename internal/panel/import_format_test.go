@@ -244,3 +244,31 @@ func TestImportUIHint(t *testing.T) {
 		t.Fatal("import hint still requires an array")
 	}
 }
+
+func TestImportPreservesStoredGlobalWhenRoutingDisabled(t *testing.T) {
+	before := auth.GlobalEnabled()
+	auth.SetGlobalEnabled(false)
+	defer auth.SetGlobalEnabled(before)
+	p, _ := newImportPanel(t)
+	raw := strings.Replace(nestedImportFixture, `"domain":"api.workbuddy.ai"`, `"domain":""`, 1)
+	w := importJSON(t, p, raw)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"imported":1`) {
+		t.Fatalf("HTTP %d %s", w.Code, w.Body)
+	}
+	a := p.cfg.Pool.AuthByUID("fixture-import-uid")
+	if a == nil || a.RealmStored() != "global" || a.Realm() != "cn" {
+		t.Fatal("runtime routing switch polluted persisted realm")
+	}
+	saved, err := os.ReadFile(a.FilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := auth.Parse(saved)
+	if err != nil || parsed.RealmStored() != "global" {
+		t.Fatal("stored global realm was lost")
+	}
+	auth.SetGlobalEnabled(true)
+	if parsed.Realm() != "global" {
+		t.Fatal("reenabling global failed to restore account routing")
+	}
+}
