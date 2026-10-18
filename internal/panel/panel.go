@@ -202,6 +202,10 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/usage/save", p.withAuth(p.usageSave))
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
+	p.mux.HandleFunc("GET /panel/api/protocol_diagnostics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		p.withAuth(p.protocolDiagnostics)(w, r)
+	})
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
 }
 

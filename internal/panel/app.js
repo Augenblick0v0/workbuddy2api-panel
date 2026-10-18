@@ -979,6 +979,7 @@ const CFG_MAP = {
   balance_refresh_enabled: ['schedule', 'balance_refresh_enabled'], balance_refresh_minutes: ['schedule', 'balance_refresh_minutes'],
   include_disabled_in_tasks: ['schedule', 'include_disabled_in_tasks'],
   max_in_flight: ['pool', 'max_in_flight'], max_in_flight_global: ['pool', 'max_in_flight_global'],
+  strict_cooldown: ['pool', 'strict_cooldown'],
   breaker_threshold: ['pool', 'breaker_threshold'],
   degrade_threshold: ['pool', 'degrade_threshold'], degrade_cooldown: ['pool', 'degrade_cooldown'],
   degrade_cooldown_max: ['pool', 'degrade_cooldown_max'],
@@ -1017,6 +1018,7 @@ function put(obj, path, val) {
 }
 
 async function loadConfig() {
+  loadProtocolDiagnostics();
   try {
     const d = await api('config');
     cfgLoaded = d.config;
@@ -1034,6 +1036,36 @@ async function loadConfig() {
     $('cfgNote').textContent = '';
   } catch (e) { toast('读取配置失败：' + e.message, 'err'); }
 }
+/* Read-only, on demand; never added to refreshVisible or a polling timer. */
+function protocolDiagnosticsText(d) {
+  const lines = [
+    '严格冷却（当前运行值）：' + (d.strict_cooldown ? '开启' : '关闭'),
+    '任务上报及专用指纹：保持原样；本页不发送任何上游请求。',
+  ];
+  for (const p of d.profiles || []) {
+    lines.push('[' + p.realm + '] UA: ' + p.user_agent,
+      '客户端 ' + p.client_version + ' / CLI ' + p.cli_version + ' / 归属 ' + p.client_name + (p.ua_override ? '（自定义 UA）' : ''));
+  }
+  for (const a of d.accounts || []) {
+    const t = a.device_token || {}, r = a.route || {};
+    const presence = t.source === 'file' ? '仅配置，未读取文件/未确认存在' : (t.present ? '已配置' : '无');
+    lines.push(a.uid + ' [' + a.realm + '] 设备 Token 来源：' + (t.source || 'none') + '（' + presence + '）；路由：' + r.state + '；槽：' + (r.slot_id || '无') + '；代际：' + r.generation);
+  }
+  if ((d.warnings || []).includes('shared_device_token_fallback_configured')) {
+    lines.push('注意：多账号池配置了全局/文件设备 Token 兜底，缺少账号专属值时可能共享。此处仅提示配置风险，未改变发送行为。');
+  }
+  return lines.join('\n');
+}
+async function loadProtocolDiagnostics() {
+  const el = $('protocolDiagnostics');
+  if (!el) return; // tolerate an already-open page from the previous release
+  el.textContent = '正在读取本机生效配置…';
+  try {
+    const d = await api('protocol_diagnostics');
+    el.textContent = protocolDiagnosticsText(d);
+  } catch (e) { el.textContent = '诊断暂不可用：' + e.message; }
+}
+if ($('btnProtocolDiagnostics')) $('btnProtocolDiagnostics').onclick = loadProtocolDiagnostics;
 function collectConfig() {
   const f = $('cfgForm'), out = {};
   for (const [name, path] of Object.entries(CFG_MAP)) {

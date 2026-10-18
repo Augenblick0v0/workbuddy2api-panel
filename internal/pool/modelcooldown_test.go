@@ -536,6 +536,7 @@ func TestHealthyForModelAccountCooledAllowsNothingAfterUntil(t *testing.T) {
 func TestHealthyForModelPriorityViaPick(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
+	p.SetStrictCooldown(false) // test the explicit legacy fallback, not strict production policy
 	p.Add(&auth.Auth{UID: "cooled"})
 	p.Add(&auth.Auth{UID: "exempt"})
 	p.SetCredits("cooled", 100, 0)

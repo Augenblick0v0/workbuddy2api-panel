@@ -1047,6 +1047,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div class="box">
           <header><h3>账号池与流量治理</h3></header>
           <div class="pad">
+            <div class="switch"><span class="lb">严格遵守账号冷却</span>
+              <input type="checkbox" name="strict_cooldown"></div>
+            <div class="hint">开启后无健康账号就停止选号，不提前使用软冷却或熔断账号；关闭保留旧版恢复兜底。立即生效。</div>
             <div class="grid3">
               <label class="fld"><span class="lb">单账号最大在途</span>
                 <input name="max_in_flight" type="number" min="0" placeholder="3">
@@ -1151,6 +1154,15 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <div class="hint">开启后，「运行日志」页的请求记录会显示每次调用来自哪个 IP、用什么客户端；
               关闭则归档与面板都不再出现来源信息。改动即时生效，无需重启。</div>
             <div class="hint" style="margin-top:8px">归档开关、保留天数与容量上限（<code>logging.request_archive_*</code>）需手工编辑配置文件。</div>
+          </div>
+        </div>
+
+        <div class="box">
+          <header><h3>出站协议诊断（只读）</h3><span class="grow"></span>
+            <button type="button" id="btnProtocolDiagnostics">刷新诊断</button></header>
+          <div class="pad">
+            <div class="hint">展示当前进程实际配置，不读取设备 Token 文件，不回显凭据、设备/会话标识或代理地址。保存需重启的字段后，以重启后的诊断值为准。</div>
+            <pre id="protocolDiagnostics" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere">打开配置页后读取</pre>
           </div>
         </div>
 

@@ -345,6 +345,7 @@ func TestCreditFloorBlocksFallbackPath(t *testing.T) {
 func TestCreditFloorFallbackAllowsFreeModel(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
+	p.SetStrictCooldown(false) // test the explicit legacy fallback, not strict production policy
 	p.SetCostExploreInterval(0)
 	p.SetCreditFloor(150)
 	p.SetModelRateOf(rates(map[string]map[string]string{"global": {"hy3": "0.00"}}))

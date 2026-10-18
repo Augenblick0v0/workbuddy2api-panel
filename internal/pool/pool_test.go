@@ -1258,6 +1258,7 @@ func TestBreakerExponentialBackoffCapped(t *testing.T) {
 
 func TestFallbackPicksEarliestExpiry(t *testing.T) {
 	p := New("")
+	p.SetStrictCooldown(false) // explicit compatibility fallback, never the production default
 	p.Add(&auth.Auth{UID: "late"})
 	p.Add(&auth.Auth{UID: "early"})
 	// 两个都软冷却；early 更早到期 → 兜底选 early。
@@ -1271,6 +1272,7 @@ func TestFallbackPicksEarliestExpiry(t *testing.T) {
 
 func TestFallbackSkipsDisabled(t *testing.T) {
 	p := New("")
+	p.SetStrictCooldown(false) // explicit compatibility fallback, never the production default
 	p.Add(&auth.Auth{UID: "cooled"})
 	p.Add(&auth.Auth{UID: "dead"})
 	p.Cooldown("cooled", CoolSoft, time.Hour, "x")
@@ -1306,6 +1308,7 @@ func TestFallbackAllHardReturnsNil(t *testing.T) {
 func TestFallbackSoftAndBreakerParticipate(t *testing.T) {
 	// D3：soft 与 breaker 冷却号允许参与兜底，取最早到期者。
 	p := New("")
+	p.SetStrictCooldown(false) // explicit compatibility fallback, never the production default
 	p.Add(&auth.Auth{UID: "soft"})
 	p.Add(&auth.Auth{UID: "brk"})
 	p.Cooldown("soft", CoolSoft, 10*time.Minute, "429") // soft: until=10m, fails=1

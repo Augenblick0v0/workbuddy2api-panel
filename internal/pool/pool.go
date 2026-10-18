@@ -13,6 +13,7 @@ import (
 
 type Pool struct {
 	routeAvailable func(string) bool // memory-only callback; never calls Pool
+	strictCooldown bool              // never borrow a cooling/broken account to keep traffic flowing
 
 	mu      sync.RWMutex
 	byUID   map[string]*entry
@@ -88,6 +89,7 @@ type Pool struct {
 func New(stateFp string) *Pool {
 	p := &Pool{
 		byUID:              map[string]*entry{},
+		strictCooldown:     true,
 		stateFp:            stateFp,
 		breakerThreshold:   defaultBreakerThreshold,
 		breakerCooldown:    defaultBreakerCooldown,
@@ -108,6 +110,21 @@ func New(stateFp string) *Pool {
 		p.startFlusher()
 	}
 	return p
+}
+
+// SetStrictCooldown controls whether all-cooling pools fail locally instead of
+// borrowing an account before its deadline. It does not mutate saved state.
+func (p *Pool) SetStrictCooldown(enabled bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.strictCooldown = enabled
+}
+
+// StrictCooldown reports the effective runtime policy, including hot changes.
+func (p *Pool) StrictCooldown() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.strictCooldown
 }
 
 // Close 停止后台落盘 goroutine 并做最后一次落盘（幂等）。
@@ -283,14 +300,23 @@ func (p *Pool) SetStore(s StoreSnapshotter) {
 // 名额用 entry.inFlight 原子自增，满额返回 false。上限按账号 realm 分档
 // （global 档 maxInFlightGlobal，P1-1；未设置回落 maxInFlight）。
 func (p *Pool) Acquire(uid string) bool {
+	return p.AcquireForModel(uid, "")
+}
+
+// AcquireForModel rechecks health under the same lock as lease acquisition:
+// another request may have cooled this account/model after Pick returned it.
+// Existing in-flight requests are not cancelled; task maintenance is unchanged.
+func (p *Pool) AcquireForModel(uid, model string) bool {
 	p.mu.RLock()
+	defer p.mu.RUnlock()
 	e, ok := p.byUID[uid]
 	if !ok || !p.routeOK(uid) {
-		p.mu.RUnlock()
+		return false
+	}
+	if p.strictCooldown && !e.healthyForModel(time.Now(), model) {
 		return false
 	}
 	limit := p.inFlightLimit(e)
-	p.mu.RUnlock()
 	if limit <= 0 {
 		// 不限：计数仍累加（供状态观测），但永不拒绝。
 		e.inFlight.Add(1)
