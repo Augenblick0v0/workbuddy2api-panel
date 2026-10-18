@@ -1,6 +1,10 @@
 package upstream
 
-import "github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+import (
+	"net/url"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+)
 
 // ProtocolProfile is an explicit allowlist, not a serialization of request headers
 // or Client. These are the existing effective values; diagnostics never mutate them.
@@ -11,6 +15,57 @@ type ProtocolProfile struct {
 	CLIVersion    string `json:"cli_version"`
 	ClientName    string `json:"client_name"`
 	UAOverride    bool   `json:"ua_override"`
+}
+
+// ProtocolPurposeProfile is a safe view of resolved existing protocol settings.
+// EndpointOrigin strips userinfo, paths, queries and fragments from overrides.
+type ProtocolPurposeProfile struct {
+	Realm          string `json:"realm"`
+	Purpose        string `json:"purpose"`
+	Identity       string `json:"identity"`
+	EndpointOrigin string `json:"endpoint_origin"`
+	UserAgent      string `json:"user_agent"`
+	Origin         string `json:"origin"`
+	Referer        string `json:"referer"`
+	Language       string `json:"language"`
+	Product        string `json:"product,omitempty"`
+	MachineHeader  bool   `json:"machine_header"`
+	SessionHeader  bool   `json:"session_header"`
+}
+
+func endpointOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+func (c *Client) ProtocolPurposeProfiles() []ProtocolPurposeProfile {
+	if c == nil {
+		return []ProtocolPurposeProfile{}
+	}
+	out := make([]ProtocolPurposeProfile, 0, 8)
+	for _, realm := range []string{"cn", "global"} {
+		a := &auth.Auth{}
+		if realm == "global" {
+			a.Domain = "www.workbuddy.ai"
+		}
+		for _, purpose := range []string{"chat", "refresh", "models", "billing"} {
+			p := c.protocolFor(a, purpose)
+			base := c.chatBase(a)
+			if purpose == "billing" {
+				base = c.billingBase(a)
+			}
+			out = append(out, ProtocolPurposeProfile{
+				Realm: p.Realm, Purpose: purpose, Identity: "existing_workbuddy",
+				EndpointOrigin: endpointOrigin(base), UserAgent: p.UserAgent,
+				Origin: p.Origin, Referer: p.Referer, Language: p.Language,
+				Product: p.Product, MachineHeader: p.MachineHeader, SessionHeader: p.SessionHeader,
+			})
+		}
+	}
+	return out
 }
 
 func (c *Client) ProtocolProfiles() []ProtocolProfile {

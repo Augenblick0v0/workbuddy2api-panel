@@ -32,7 +32,7 @@ import (
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-const appVersion = "1.13.0-panel-safety.1"
+const appVersion = "1.13.0-panel-safety.2"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -160,6 +160,7 @@ func main() {
 	up.ClientName = cfg.Upstream.ClientName
 	up.DeviceToken = cfg.Upstream.DeviceToken
 	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
+	up.AccountDeviceTokenOnly.Store(cfg.Upstream.AccountDeviceTokenOnly)
 	up.PassthroughIP = cfg.Upstream.PassthroughIP
 	// global realm 路由（config global 段）：上游侧开关（第一道闸）+ base 覆盖；
 	// auth 侧开关（auth.SetGlobalEnabled）是第二道闸，两者同 config global.enabled。
@@ -178,8 +179,9 @@ func main() {
 		log.Fatal("egress: expected base transport before installation")
 	}
 	eg, err := egress.Open(stateSibling(cfg.StateFile, "proxies.json"), egress.Options{
-		BaseTransport: baseTransport,
-		AllowedCIDRs:  cfg.Egress.AllowedProxyCIDRs,
+		BaseTransport:             baseTransport,
+		AllowedCIDRs:              cfg.Egress.AllowedProxyCIDRs,
+		IsolateAccountConnections: cfg.Egress.IsolateAccountConnections,
 	})
 	if err != nil {
 		log.Fatalf("egress startup: %s", err)
@@ -505,6 +507,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		RecordClientInfo:     newCfg.Logging.RequestClientInfo,
 	})
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
+	up.AccountDeviceTokenOnly.Store(newCfg.Upstream.AccountDeviceTokenOnly)
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
 	p.SetMaxInFlight(newCfg.Pool.MaxInFlight)
 	p.SetStrictCooldown(newCfg.Pool.StrictCooldown)
@@ -554,7 +557,9 @@ func restartRequiredFields(c *Config) []string {
 	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
 	out = append(out, "logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb")
 	out = append(out, "server.read_timeout")
-	out = append(out, "egress.allowed_proxy_cidrs")
+	out = append(out, "egress.allowed_proxy_cidrs", "egress.isolate_account_connections")
+	out = append(out, "upstream.client_version", "upstream.cli_version", "upstream.client_name",
+		"upstream.device_token", "upstream.device_token_file", "upstream.passthrough_ip")
 	return out
 }
 

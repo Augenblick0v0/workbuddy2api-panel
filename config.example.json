@@ -4,6 +4,7 @@
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "egress": {
+    "isolate_account_connections": true,
     "allowed_proxy_cidrs": []
   },
   "server": {
@@ -54,6 +55,7 @@
     "client_name": "",
     "device_token": "",
     "device_token_file": "",
+    "account_device_token_only": true,
     "passthrough_ip": false
   },
   "features": {

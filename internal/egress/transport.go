@@ -160,6 +160,15 @@ func (m *Manager) RoundTrip(req *http.Request) (_ *http.Response, returnedErr er
 		m.mu.Unlock()
 		return nil, routeError(s)
 	}
+	// Legacy slot-level handles intentionally pin a logical operation's route,
+	// including the existing confirmed billing-500 retry contract. New
+	// operations always ResolveAccount against the current binding. Account
+	// isolation additionally retires old UID pools on rebinding and disallows
+	// further sends through those handles; neither policy reroutes a retry.
+	if m.opts.IsolateAccountConnections && h.accountUID != "" && c.Bindings[h.accountUID] != h.SlotID {
+		m.mu.Unlock()
+		return nil, &EgressError{Code: "proxy_unavailable", SlotID: h.SlotID, Generation: h.Generation, Stage: "binding"}
+	}
 	g := m.transports[h.transportKey]
 	if h.released.Load() || g == nil || g.retired || s.Generation != h.Generation {
 		m.mu.Unlock()
@@ -236,7 +245,9 @@ func (m *Manager) markUnavailable(h *RouteHandle) {
 	m.mu.Lock()
 	// Stop this failed operation, but do not permanently poison the slot.
 	// Once this deadline expires, only a new request may retry the same route.
-	m.unavailable[h.transportKey] = time.Now().Add(m.opts.FailureCooldown)
+	// Connection pools may be per-account, but a proxy connection failure is
+	// still evidence about the shared logical slot-generation exit.
+	m.unavailable[transportKey(h.SlotID, h.Generation)] = time.Now().Add(m.opts.FailureCooldown)
 	m.publishRuntimeLocked()
 	m.mu.Unlock()
 }

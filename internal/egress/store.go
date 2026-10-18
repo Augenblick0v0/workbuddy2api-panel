@@ -40,7 +40,7 @@ func clone(c Config) Config {
 	return n
 }
 func Open(path string, opts Options) (*Manager, error) {
-	m := &Manager{path: path, opts: opts, transports: map[string]*generation{}, unavailable: map[string]time.Time{}, waf: map[string]time.Time{}}
+	m := &Manager{path: path, opts: opts, transports: map[string]*generation{}, accountPools: map[string]string{}, unavailable: map[string]time.Time{}, waf: map[string]time.Time{}}
 	if m.opts.FailureCooldown <= 0 {
 		m.opts.FailureCooldown = 15 * time.Second
 	}
@@ -181,21 +181,17 @@ func (m *Manager) Update(expected uint64, edit func(*Config) error) (Config, err
 	m.publishRuntimeLocked()
 	m.snapshot.Store(&published)
 	for key, g := range m.transports {
-		keep := key == "direct"
-		if !keep {
-			for id, s := range published.Slots {
-				if s.Enabled && key == transportKey(id, s.TransportGeneration) {
-					keep = true
-					break
-				}
-			}
+		keep := g.slotID == ""
+		if g.slotID != "" {
+			s, ok := published.Slots[g.slotID]
+			keep = ok && s.Enabled && s.TransportGeneration == g.slotGeneration
 		}
-		if !keep {
-			g.retired = true
-			if g.refs == 0 {
-				g.transport.CloseIdleConnections()
-				delete(m.transports, key)
-			}
+		if g.accountUID != "" {
+			id, bound := published.Bindings[g.accountUID]
+			keep = keep && id == g.slotID && bound == g.accountBound
+		}
+		if !keep || g.retired {
+			m.retireTransportLocked(key, g)
 		}
 	}
 	return clone(published), nil
@@ -277,8 +273,8 @@ func transportKey(id string, g uint64) string {
 	return fmt.Sprintf("%s:%d", id, g)
 }
 func (m *Manager) inUseLocked(id string) bool {
-	for key, g := range m.transports {
-		if strings.HasPrefix(key, id+":") && g.callers.Load() > 0 {
+	for _, g := range m.transports {
+		if g.slotID == id && g.callers.Load() > 0 {
 			return true
 		}
 	}

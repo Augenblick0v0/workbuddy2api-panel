@@ -51,6 +51,7 @@ func (c *Client) ForRoute(h *egress.RouteHandle) *Client {
 		GlobalEnabled: c.GlobalEnabled,
 	}
 	n.SanitizeFingerprints.Store(c.SanitizeFingerprints.Load())
+	n.AccountDeviceTokenOnly.Store(c.AccountDeviceTokenOnly.Load())
 	return n
 }
 

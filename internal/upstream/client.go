@@ -670,6 +670,9 @@ type Client struct {
 
 	// DeviceTokenFile 设备 token 文件路径兜底（宿主落盘的桌面端 token，5 分钟读取缓存）。
 	DeviceTokenFile string
+	// AccountDeviceTokenOnly applies exclusively to gateway chat requests.
+	// Task reporting and its legacy token fallback remain unchanged.
+	AccountDeviceTokenOnly atomic.Bool
 
 	ChatBaseCN    string
 	BillingBaseCN string

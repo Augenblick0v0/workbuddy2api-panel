@@ -246,6 +246,75 @@ test('OAuth late start after closing is canceled', async () => {
   assert.ok(h.calls.some(c => c.route === 'login/cancel' && c.body.state === 'late-state')); assert.equal(h.eval('loginState'), null);
 });
 
+test('OAuth pending and temporary wait retain one state, respect safe delay, and can complete', async () => {
+  const h = harness(); h.el('addProxySlot').value = 'slot-1';
+  let response = { done: false, message: 'waiting_for_login', stage: 'token', upstream_code: 11217, retry_after: 3 };
+  h.api(async (route, opts) => {
+    h.calls.push({ route, body: opts?.body ? JSON.parse(opts.body) : null });
+    if (route === 'login/start') return { state: 'same-state', url: 'https://official.example/' };
+    if (route.startsWith('login/poll')) return response;
+    if (route === 'proxies') return fixture();
+    return {};
+  });
+  await h.ctx.startAddLogin(); await h.ctx.pollLogin();
+  assert.equal(h.eval('loginState'), 'same-state');
+  assert.match(h.el('addPoll').textContent, /等待你在官方页面完成授权/);
+  assert.equal(h.el('addErr').hidden, true);
+  response = { done: false, message: 'upstream_retry_wait', retry_after: 17 };
+  await h.ctx.pollLogin();
+  assert.equal(h.eval('loginState'), 'same-state');
+  assert.equal(h.timers.get(h.eval('loginTimer')).delay, 17000);
+  assert.match(h.el('addPoll').textContent, /保留当前授权会话.*17 秒后重试/);
+  assert.equal(h.calls.some(c => c.route === 'login/cancel'), false);
+  response = { done: true, uid: 'alice' };
+  await h.ctx.pollLogin();
+  assert.equal(h.eval('loginState'), null);
+  assert.equal(h.el('addDone').hidden, false);
+  assert.equal(h.eval('loginTimer'), null);
+});
+
+test('OAuth terminal diagnostics are allowlisted, stop polling and allow restart without closing', async () => {
+  const h = harness(); h.el('addProxySlot').value = 'slot-1';
+  h.api(async (route, opts) => {
+    h.calls.push({ route, body: opts?.body ? JSON.parse(opts.body) : null });
+    if (route === 'login/start') return { state: 'terminal-state', url: 'https://official.example/' };
+    if (route.startsWith('login/poll')) {
+      const e = new Error('raw upstream message must not appear');
+      e.code = 'oauth_upstream_failed';
+      e.detail = { stage: 'token', category: 'business', upstream_status: 200, upstream_code: 999, body: 'secret-body', url: 'private-url', state: 'private-state' };
+      throw e;
+    }
+    return {};
+  });
+  await h.ctx.startAddLogin(); await h.ctx.pollLogin();
+  assert.equal(h.eval('loginState'), null);
+  assert.equal(h.eval('loginTimer'), null);
+  assert.match(h.el('addErr').textContent, /等待授权.*上游拒绝授权.*HTTP 200.*业务码 999/);
+  assert.doesNotMatch(h.el('addErr').textContent, /raw upstream|secret-body|private-url|private-state|关闭后重新添加/);
+  assert.equal(h.el('btnStartLogin').disabled, false);
+  assert.equal(h.el('btnStartLogin').hidden, false);
+  assert.equal(h.el('addPick').hidden, false);
+  assert.ok(h.calls.some(c => c.route === 'login/cancel' && c.body.state === 'terminal-state'));
+  const before = h.calls.length;
+  await h.ctx.pollLogin();
+  assert.equal(h.calls.length, before);
+});
+
+test('OAuth pending retry delay is bounded and closing releases the retained state', async () => {
+  const h = harness(); h.el('addProxySlot').value = 'slot-1';
+  h.api(async (route, opts) => {
+    h.calls.push({ route, body: opts?.body ? JSON.parse(opts.body) : null });
+    if (route === 'login/start') return { state: 'retry-state', url: 'https://official.example/' };
+    if (route.startsWith('login/poll')) return { done: false, message: 'upstream_retry_wait', retry_after: 999999 };
+    return {};
+  });
+  await h.ctx.startAddLogin(); await h.ctx.pollLogin();
+  assert.equal(h.timers.get(h.eval('loginTimer')).delay, 60000);
+  h.ctx.closeAdd(); await Promise.resolve();
+  assert.equal(h.eval('loginState'), null); assert.equal(h.eval('loginTimer'), null);
+  assert.ok(h.calls.some(c => c.route === 'login/cancel' && c.body.state === 'retry-state'));
+});
+
 test('OAuth existing binding requires explicit rebind confirmation then poll query, done is applied once', async () => {
   const h = harness(); h.el('addProxySlot').value = 'slot-1'; let count = 0;
   h.api(async (route, opts) => {

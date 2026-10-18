@@ -16,10 +16,13 @@ import (
 	"errors"
 	"io"
 	"log"
+	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -93,6 +96,53 @@ type apiEnvelope struct {
 type loginUpstreamError struct {
 	status, code int
 	pending      bool
+	stage        string
+	category     string
+	transient    bool
+	retryAfter   int
+}
+
+const (
+	loginStageState   = "state"
+	loginStageToken   = "token"
+	loginStageAccount = "account"
+	loginMaxTransient = 5
+	loginMaxRetryWait = 60
+)
+
+// Only token GET may interpret pending responses. The prefixed CN response was
+// observed with HTTP 200/code 11217; never turn arbitrary 11217 failures into a wait.
+func loginTokenPending(stage string, env apiEnvelope) bool {
+	if stage != loginStageToken {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(env.Msg))
+	switch msg {
+	case "login ing", "pending", "waiting for login", "login pending":
+		return true // Preserve the existing token polling vocabulary.
+	case "11217:login ing...":
+		return env.Code == 11217
+	}
+	return false
+}
+
+func loginRetryAfter(raw string, now time.Time) int {
+	if n, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil {
+		if n > 0 {
+			return n
+		}
+		return 0
+	}
+	if at, err := http.ParseTime(raw); err == nil && at.After(now) {
+		return int(math.Ceil(at.Sub(now).Seconds()))
+	}
+	return 0
+}
+
+func loginDiagnostic(e *loginUpstreamError) map[string]any {
+	// These fields are enums/integers under our control. Never include err.Error(),
+	// upstream msg/body, the full request URL, bearer, or device authorization state.
+	return map[string]any{"stage": e.stage, "upstream_status": e.status, "upstream_code": e.code, "category": e.category}
 }
 
 func (s *loginSession) stop() {
@@ -123,10 +173,10 @@ func (p *Panel) loginEP(realm string) (string, string, string, string) {
 	return loginEndpoints(realm)
 }
 
-func (p *Panel) loginJSON(ctx context.Context, h *egress.RouteHandle, method, fullURL, bearer string, body io.Reader, origin string) (json.RawMessage, error) {
+func (p *Panel) loginJSON(ctx context.Context, h *egress.RouteHandle, method, fullURL, bearer string, body io.Reader, origin, stage string) (json.RawMessage, error) {
 	req, err := http.NewRequestWithContext(ctx, method, fullURL, body)
 	if err != nil {
-		return nil, errors.New("oauth_request_failed")
+		return nil, &loginUpstreamError{stage: stage, category: "request"}
 	}
 	commonHeaders(req, origin)
 	if bearer != "" {
@@ -148,24 +198,37 @@ func (p *Panel) loginJSON(ctx context.Context, h *egress.RouteHandle, method, fu
 				return nil, changed
 			}
 		}
-		return nil, err
+		var routeErr *egress.EgressError
+		if errors.As(err, &routeErr) {
+			if routeErr.Stage == "upstream" && (routeErr.Code == "upstream_timeout" || routeErr.Code == "upstream_transport_failed") {
+				return nil, &loginUpstreamError{stage: stage, category: "network", transient: true}
+			}
+			return nil, routeErr
+		}
+		var ne net.Error
+		transient := (errors.As(err, &ne) && (ne.Timeout() || ne.Temporary())) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+		return nil, &loginUpstreamError{stage: stage, category: "network", transient: transient}
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		retryAfter := loginRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+		transient := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 && resp.StatusCode <= 599
+		// Do not retry sooner than requested, or keep a session in an unbounded wait.
+		if retryAfter > loginMaxRetryWait {
+			transient = false
+		}
+		return nil, &loginUpstreamError{stage: stage, category: "http", status: resp.StatusCode, transient: transient, retryAfter: retryAfter}
+	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
 	if err != nil || len(raw) > 1<<20 {
-		return nil, errors.New("oauth_response_failed")
-	}
-	if resp.StatusCode >= 300 {
-		return nil, &loginUpstreamError{status: resp.StatusCode}
+		return nil, &loginUpstreamError{stage: stage, category: "response", status: resp.StatusCode, transient: err != nil}
 	}
 	var env apiEnvelope
 	if json.Unmarshal(raw, &env) != nil {
-		return nil, errors.New("oauth_response_failed")
+		return nil, &loginUpstreamError{stage: stage, category: "response", status: resp.StatusCode}
 	}
 	if env.Code != 0 {
-		msg := strings.ToLower(strings.TrimSpace(env.Msg))
-		pending := msg == "login ing" || msg == "pending" || msg == "waiting for login" || msg == "login pending"
-		return nil, &loginUpstreamError{status: resp.StatusCode, code: env.Code, pending: pending}
+		return nil, &loginUpstreamError{stage: stage, category: "business", status: resp.StatusCode, code: env.Code, pending: loginTokenPending(stage, env)}
 	}
 	return env.Data, nil
 }
@@ -217,7 +280,7 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	ep, _, _, origin := p.loginEP(realm)
-	data, err := p.loginJSON(r.Context(), h, http.MethodPost, ep, "", bytes.NewReader([]byte("{}")), origin)
+	data, err := p.loginJSON(r.Context(), h, http.MethodPost, ep, "", bytes.NewReader([]byte("{}")), origin, loginStageState)
 	if err != nil {
 		p.loginFailure(w, err)
 		return
@@ -272,6 +335,13 @@ func (p *Panel) loginFailure(w http.ResponseWriter, err error) {
 		proxyFailure(w, err)
 		return
 	}
+	var oe *loginUpstreamError
+	if errors.As(err, &oe) {
+		d := loginDiagnostic(oe)
+		d["error"], d["code"] = "oauth_upstream_failed", "oauth_upstream_failed"
+		writeJSON(w, 502, d)
+		return
+	}
 	proxyError(w, 502, "oauth_upstream_failed")
 }
 
@@ -323,17 +393,58 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	}
 	_, epToken, epAcct, origin := p.loginEP(sess.realm)
 	if sess.credentials == nil {
-		raw, err := p.loginJSON(ctx, sess.route, http.MethodGet, epToken+url.QueryEscape(state), "", nil, origin)
+		if time.Now().Before(sess.nextPollAt) {
+			retry := int(math.Ceil(time.Until(sess.nextPollAt).Seconds()))
+			w.Header().Set("Retry-After", strconv.Itoa(retry))
+			writeJSON(w, 200, map[string]any{"done": false, "message": "upstream_retry_wait", "retry_after": retry, "stage": loginStageToken, "category": "retry_wait"})
+			return
+		}
+		raw, err := p.loginJSON(ctx, sess.route, http.MethodGet, epToken+url.QueryEscape(state), "", nil, origin, loginStageToken)
 		if err != nil {
 			var oe *loginUpstreamError
 			if errors.As(err, &oe) && oe.pending {
-				writeJSON(w, 200, map[string]any{"done": false, "message": "waiting_for_login"})
+				sess.transientFailures, sess.nextPollAt = 0, time.Time{}
+				d := loginDiagnostic(oe)
+				d["done"], d["message"], d["retry_after"] = false, "waiting_for_login", 3
+				writeJSON(w, 200, d)
+				return
+			}
+			if ctx.Err() != nil {
+				if sess.ctx.Err() != nil {
+					terminal("oauth_expired")
+					proxyError(w, 409, "oauth_expired")
+				} else {
+					// A disconnected poll client must not destroy the user's authorization.
+					proxyError(w, 409, "oauth_poll_cancelled")
+				}
+				return
+			}
+			if errors.As(err, &oe) && oe.transient && sess.transientFailures < loginMaxTransient {
+				retry := 3 << sess.transientFailures
+				if oe.retryAfter > retry {
+					retry = oe.retryAfter
+				}
+				if retry > loginMaxRetryWait {
+					retry = loginMaxRetryWait
+				}
+				if deadline, ok := sess.ctx.Deadline(); ok && time.Until(deadline) <= time.Duration(retry)*time.Second {
+					terminal("oauth_expired")
+					proxyError(w, 409, "oauth_expired")
+					return
+				}
+				sess.transientFailures++
+				sess.nextPollAt = time.Now().Add(time.Duration(retry) * time.Second)
+				d := loginDiagnostic(oe)
+				d["done"], d["message"], d["retry_after"] = false, "upstream_retry_wait", retry
+				w.Header().Set("Retry-After", strconv.Itoa(retry))
+				writeJSON(w, 200, d)
 				return
 			}
 			terminal("oauth_terminal_error")
 			p.loginFailure(w, err)
 			return
 		}
+		sess.transientFailures, sess.nextPollAt = 0, time.Time{}
 		var tok struct {
 			AccessToken  string `json:"accessToken"`
 			RefreshToken string `json:"refreshToken"`
@@ -345,7 +456,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 			proxyError(w, 502, "oauth_token_failed")
 			return
 		}
-		raw, err = p.loginJSON(ctx, sess.route, http.MethodGet, epAcct+url.QueryEscape(state), tok.AccessToken, nil, origin)
+		raw, err = p.loginJSON(ctx, sess.route, http.MethodGet, epAcct+url.QueryEscape(state), tok.AccessToken, nil, origin, loginStageAccount)
 		if err != nil {
 			terminal("oauth_terminal_error")
 			p.loginFailure(w, err)

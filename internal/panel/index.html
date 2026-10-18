@@ -1050,6 +1050,12 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <div class="switch"><span class="lb">严格遵守账号冷却</span>
               <input type="checkbox" name="strict_cooldown"></div>
             <div class="hint">开启后无健康账号就停止选号，不提前使用软冷却或熔断账号；关闭保留旧版恢复兜底。立即生效。</div>
+            <div class="switch"><span class="lb">API 聊天仅用账号专属设备 Token</span>
+              <input type="checkbox" name="account_device_token_only"></div>
+            <div class="hint">立即生效；不使用全局/文件 Token 兜底，不伪造缺失凭据。任务上报、签到、余额及专用字段不变。</div>
+            <div class="switch"><span class="lb">账号级连接池隔离</span>
+              <input type="checkbox" name="isolate_account_connections"></div>
+            <div class="hint">同账号复用、不同账号分池；共享出口的 WAF/故障仍联动。修改需重启。</div>
             <div class="grid3">
               <label class="fld"><span class="lb">单账号最大在途</span>
                 <input name="max_in_flight" type="number" min="0" placeholder="3">

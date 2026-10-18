@@ -980,6 +980,8 @@ const CFG_MAP = {
   include_disabled_in_tasks: ['schedule', 'include_disabled_in_tasks'],
   max_in_flight: ['pool', 'max_in_flight'], max_in_flight_global: ['pool', 'max_in_flight_global'],
   strict_cooldown: ['pool', 'strict_cooldown'],
+  account_device_token_only: ['upstream', 'account_device_token_only'],
+  isolate_account_connections: ['egress', 'isolate_account_connections'],
   breaker_threshold: ['pool', 'breaker_threshold'],
   degrade_threshold: ['pool', 'degrade_threshold'], degrade_cooldown: ['pool', 'degrade_cooldown'],
   degrade_cooldown_max: ['pool', 'degrade_cooldown_max'],
@@ -1041,19 +1043,30 @@ function protocolDiagnosticsText(d) {
   const lines = [
     '严格冷却（当前运行值）：' + (d.strict_cooldown ? '开启' : '关闭'),
     '任务上报及专用指纹：保持原样；本页不发送任何上游请求。',
+    'API 聊天仅用账号专属设备 Token：' + (d.api_account_device_token_only ? '开启' : '关闭'),
+    '账号级连接池隔离：' + (d.account_connection_isolation ? '开启' : '关闭'),
+    '设备标识：保留现有值，未批量更换；国际版身份特征未自动升级。',
   ];
   for (const p of d.profiles || []) {
     lines.push('[' + p.realm + '] UA: ' + p.user_agent,
       '客户端 ' + p.client_version + ' / CLI ' + p.cli_version + ' / 归属 ' + p.client_name + (p.ua_override ? '（自定义 UA）' : ''));
   }
+  for (const p of d.purpose_profiles || []) {
+    lines.push('用途 [' + p.realm + '/' + p.purpose + '] 目标：' + (p.endpoint_origin || '未设置') +
+      '；Origin：' + (p.origin || '不发送') + '；Referer：' + (p.referer || '不发送') +
+      '；语言：' + p.language + '；机器/会话头：' + (p.machine_header ? '有' : '无') + '/' + (p.session_header ? '有' : '无'));
+  }
   for (const a of d.accounts || []) {
     const t = a.device_token || {}, r = a.route || {};
     const presence = t.source === 'file' ? '仅配置，未读取文件/未确认存在' : (t.present ? '已配置' : '无');
     lines.push(a.uid + ' [' + a.realm + '] 设备 Token 来源：' + (t.source || 'none') + '（' + presence + '）；路由：' + r.state + '；槽：' + (r.slot_id || '无') + '；代际：' + r.generation);
+    if (a.api_device_token) lines.push('  API 聊天 Token 来源：' + a.api_device_token.source);
+    if (a.alert) lines.push('  账号提示：' + a.alert + '（保持原状态，需人工复核；不会自动换身份）');
   }
   if ((d.warnings || []).includes('shared_device_token_fallback_configured')) {
-    lines.push('注意：多账号池配置了全局/文件设备 Token 兜底，缺少账号专属值时可能共享。此处仅提示配置风险，未改变发送行为。');
+    lines.push('注意：全局/文件设备 Token 可能共享；API 聊天受上述专属策略控制，任务及维护请求继续使用原有规则。');
   }
+  if ((d.warnings || []).includes('disabled_accounts_require_review')) lines.push('告警：存在已禁用账号，请复核授权状态；不会自动解冻或用新身份重试。');
   return lines.join('\n');
 }
 async function loadProtocolDiagnostics() {
@@ -1445,6 +1458,15 @@ addEventListener('beforeunload', ev => {
 });
 
 /* ── 添加账号 ─────────────────────────────────────────────────────── */
+function oauthErrorText(e) {
+  if ((e.code || e.message) !== 'oauth_upstream_failed') return proxyErrorText(e);
+  const d = e.detail || {}, stages = { state: '申请授权', token: '等待授权', account: '读取账号' };
+  const categories = { request: '请求构造失败', network: '网络暂不可用', http: '上游 HTTP 错误', response: '响应格式异常', business: '上游拒绝授权' };
+  const parts = [stages[d.stage] || 'OAuth', categories[d.category] || '上游请求失败'];
+  if (Number.isInteger(d.upstream_status) && d.upstream_status > 0) parts.push('HTTP ' + d.upstream_status);
+  if (Number.isInteger(d.upstream_code) && d.upstream_code !== 0) parts.push('业务码 ' + d.upstream_code);
+  return parts.join(' · ');
+}
 function openAdd() {
   closeAdd();
   fillOAuthSlots();
@@ -1488,6 +1510,7 @@ async function startAddLogin() {
     $('addUrl').textContent = r.url;
     $('addPick').hidden = true;
     $('addLoad').hidden = true; $('addReady').hidden = false;
+    $('addPoll').textContent = '等待你在官方页面完成授权；当前会话会继续检测。';
     $('btnStartLogin').hidden = true;
     $('btnCopyUrl').hidden = false; $('btnOpenUrl').hidden = false;
     loginTimer = setTimeout(pollLogin, 3000);
@@ -1496,7 +1519,7 @@ async function startAddLogin() {
     $('addLoad').hidden = true;
     $('btnStartLogin').disabled = false;
     $('addErr').hidden = false;
-    $('addErr').textContent = proxyErrorText(e);
+    $('addErr').textContent = oauthErrorText(e);
   }
 }
 function stopPoll() { if (loginTimer) { clearTimeout(loginTimer); loginTimer = null; } }
@@ -1513,11 +1536,11 @@ async function pollLogin() {
   }
   stopPoll(); loginPolling = true;
   const state = loginState, epoch = loginEpoch;
-  let pending = false;
+  let pending = false, retryMS = 3000;
   try {
     const r = await api('login/poll?state=' + encodeURIComponent(state) + (loginRebind ? '&confirm_rebind=true' : ''));
     if (epoch !== loginEpoch || state !== loginState) return;
-    if (r.error || r.code) { const e = new Error(r.error || r.code); e.code = r.code || r.error; throw e; }
+    if (r.error || r.code) { const e = new Error(r.error || r.code); e.code = r.code || r.error; e.detail = r; throw e; }
     if (r.done) {
       loginState = null;
       $('addReady').hidden = true;
@@ -1525,7 +1548,13 @@ async function pollLogin() {
       $('addDone').textContent = '已添加 ' + (r.nickname || r.uid) + (r.realm === 'global' ? '（国际版）' : '') + '，账号与所选出口已载入池中';
       loadOverview(true); loadProxies(true);
       setTimeout(() => { if (epoch === loginEpoch) closeAdd(); }, 1600);
-    } else pending = true;
+    } else {
+      pending = true;
+      if (Number.isFinite(r.retry_after)) retryMS = Math.max(3, Math.min(60, r.retry_after)) * 1000;
+      $('addPoll').textContent = r.message === 'upstream_retry_wait'
+        ? '上游暂时不可用，保留当前授权会话；' + Math.ceil(retryMS / 1000) + ' 秒后重试（无需关闭或重新添加）。'
+        : '等待你在官方页面完成授权；当前会话会继续检测。';
+    }
   } catch (e) {
     if (epoch !== loginEpoch || state !== loginState) return;
     if (e.code === 'oauth_rebind_required' && !loginRebind &&
@@ -1535,14 +1564,17 @@ async function pollLogin() {
       loginState = null;
       $('addReady').hidden = true;
       $('addErr').hidden = false;
-      $('addErr').textContent = proxyErrorText(e) + '（关闭后重新添加）';
+      $('addErr').textContent = oauthErrorText(e) + '。本次授权已停止，可重新发起；不需要反复关闭弹窗。';
+      $('addPick').hidden = false;
+      $('btnStartLogin').hidden = false; $('btnStartLogin').disabled = false;
+      $('btnCopyUrl').hidden = true; $('btnOpenUrl').hidden = true;
       await cancelLoginState(state);
     }
   } finally {
     loginPolling = false;
     if (epoch === loginEpoch) {
       stopPoll();
-      if (pending && state === loginState) loginTimer = setTimeout(pollLogin, 3000);
+      if (pending && state === loginState) loginTimer = setTimeout(pollLogin, retryMS);
     }
   }
 }

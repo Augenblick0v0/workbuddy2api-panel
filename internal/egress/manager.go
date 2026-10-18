@@ -8,6 +8,12 @@ import (
 	"time"
 )
 
+// IsolatesAccountConnections is immutable startup configuration, safe to expose
+// without any network, credential, or mutable transport-map access.
+func (m *Manager) IsolatesAccountConnections() bool {
+	return m != nil && m.opts.IsolateAccountConnections
+}
+
 func (m *Manager) releaseRef(key string, caller bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -20,6 +26,43 @@ func (m *Manager) releaseRef(key string, caller bool) {
 			g.transport.CloseIdleConnections()
 			delete(m.transports, key)
 		}
+	}
+	m.pruneAccountPoolsLocked()
+}
+
+// Retire lookup eligibility immediately, but retain body/caller ownership until
+// old streams finish. A subsequent rebind back to this route must get a fresh
+// pool, not overwrite the generation still owned by an old response body.
+func (m *Manager) retireTransportLocked(key string, g *generation) {
+	g.retired = true
+	if g.accountUID != "" && m.accountPools[g.accountUID] == key {
+		delete(m.accountPools, g.accountUID)
+	}
+	g.transport.CloseIdleConnections()
+	if g.refs == 0 {
+		delete(m.transports, key)
+	}
+}
+
+const maxCachedAccountPools = 256
+
+// Idle pools are bounded independently of the number of historical account
+// UIDs. Referenced streams/handles are never evicted; their final release
+// performs another sweep, so active concurrency cannot become permanent cache.
+func (m *Manager) pruneAccountPoolsLocked() {
+	for len(m.accountPools) > maxCachedAccountPools {
+		var oldestKey string
+		var oldest *generation
+		for _, key := range m.accountPools {
+			g := m.transports[key]
+			if g != nil && g.refs == 0 && (oldest == nil || g.lastUsed < oldest.lastUsed) {
+				oldestKey, oldest = key, g
+			}
+		}
+		if oldest == nil {
+			return
+		}
+		m.retireTransportLocked(oldestKey, oldest)
 	}
 }
 func (m *Manager) routeKeyLocked(c *Config, id string, g uint64) string {
@@ -133,7 +176,11 @@ func (m *Manager) ResolveAccount(uid string) (*RouteHandle, error) {
 		s.State = "pending"
 		return nil, routeError(s)
 	}
-	h, err := m.resolveLocked(c, c.Bindings[uid], false)
+	isolatedUID := ""
+	if m.opts.IsolateAccountConnections {
+		isolatedUID = uid
+	}
+	h, err := m.resolveForAccountLocked(c, c.Bindings[uid], false, isolatedUID)
 	if h != nil {
 		h.accountUID = uid
 	}
@@ -145,6 +192,9 @@ func (m *Manager) ResolveSlot(id string) (*RouteHandle, error) {
 	return m.resolveLocked(m.snapshot.Load(), id, false)
 }
 func (m *Manager) resolveLocked(c *Config, id string, probe bool) (*RouteHandle, error) {
+	return m.resolveForAccountLocked(c, id, probe, "")
+}
+func (m *Manager) resolveForAccountLocked(c *Config, id string, probe bool, uid string) (*RouteHandle, error) {
 	s := m.statusLocked(c, id)
 	if probe && (s.State == "unavailable" || s.State == "waf_blocked") {
 		if id == "" {
@@ -157,13 +207,36 @@ func (m *Manager) resolveLocked(c *Config, id string, probe bool) (*RouteHandle,
 		return nil, routeError(s)
 	}
 	key := transportKey(id, s.Generation)
+	if uid != "" {
+		key = m.accountPools[uid]
+	}
 	g := m.transports[key]
+	_, bound := c.Bindings[uid]
+	if g != nil && (g.retired || g.slotID != id || g.slotGeneration != s.Generation || (uid != "" && g.accountBound != bound)) {
+		m.retireTransportLocked(key, g)
+		g = nil
+	}
 	if g == nil {
-		g = &generation{transport: m.makeTransport(c.Slots[id])}
+		if uid != "" {
+			// The sequence prevents a route-away-and-back ABA collision with
+			// the response-body ownership of an earlier retired account pool.
+			for {
+				m.poolSequence++
+				key = transportKey(id, s.Generation) + "|account:" + strconv.FormatUint(m.poolSequence, 10)
+				if m.transports[key] == nil {
+					break
+				}
+			}
+			m.accountPools[uid] = key
+		}
+		g = &generation{transport: m.makeTransport(c.Slots[id]), slotID: id, slotGeneration: s.Generation, accountUID: uid, accountBound: bound}
 		m.transports[key] = g
 	}
+	m.poolClock++
+	g.lastUsed = m.poolClock
 	g.refs++
 	g.callers.Add(1)
+	m.pruneAccountPoolsLocked()
 	return &RouteHandle{SlotID: id, Generation: s.Generation, RouteKey: s.RouteKey, manager: m, transportKey: key}, nil
 }
 func (m *Manager) CheckCurrent(h *RouteHandle) error {

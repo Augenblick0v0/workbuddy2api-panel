@@ -130,16 +130,18 @@ const loginTTL = 15 * time.Minute
 
 // loginSession 进行中的 OAuth 会话：创建时刻 + realm（cn/global，用于落盘与端点切换）。
 type loginSession struct {
-	created       time.Time
-	realm         string // "cn" / "global"，缺省 cn
-	mu            sync.Mutex
-	ctx           context.Context
-	cancel        context.CancelFunc
-	route         *egress.RouteHandle
-	confirmRebind bool
-	result        map[string]any
-	stopped       string
-	credentials   *auth.Auth
+	created           time.Time
+	realm             string // "cn" / "global"，缺省 cn
+	mu                sync.Mutex
+	ctx               context.Context
+	cancel            context.CancelFunc
+	route             *egress.RouteHandle
+	confirmRebind     bool
+	result            map[string]any
+	stopped           string
+	credentials       *auth.Auth
+	transientFailures int
+	nextPollAt        time.Time
 }
 
 // New 构建面板。

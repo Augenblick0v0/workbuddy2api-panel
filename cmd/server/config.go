@@ -24,7 +24,8 @@ type Config struct {
 	StateFile string `json:"state_file"` // ./data/state.json
 	Egress    struct {
 		// Explicit private proxy networks only; metadata/link-local stay blocked.
-		AllowedProxyCIDRs []string `json:"allowed_proxy_cidrs"`
+		AllowedProxyCIDRs         []string `json:"allowed_proxy_cidrs"`
+		IsolateAccountConnections bool     `json:"isolate_account_connections"`
 	} `json:"egress"`
 
 	Panel struct {
@@ -150,6 +151,8 @@ type Config struct {
 		DeviceToken string `json:"device_token"`
 		// DeviceTokenFile device token 文件路径兜底（宿主落盘的桌面端 token，5 分钟读取缓存）。
 		DeviceTokenFile string `json:"device_token_file"`
+		// API chat only. Tasks keep their existing token policy/headers.
+		AccountDeviceTokenOnly bool `json:"account_device_token_only"`
 		// PassthroughIP 是否透传客户端 IP 给上游（默认 false，反代安全边界）。
 		PassthroughIP bool `json:"passthrough_ip"`
 	} `json:"upstream"`
@@ -271,6 +274,8 @@ func Default() *Config {
 	c.Schedule.BalanceRefreshEnabled = true
 	c.Schedule.BalanceRefreshMinutes = 5
 	c.Upstream.TimeoutSeconds = 120
+	c.Upstream.AccountDeviceTokenOnly = true
+	c.Egress.IsolateAccountConnections = true
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
 	c.Upstream.IdleTimeoutSeconds = 0

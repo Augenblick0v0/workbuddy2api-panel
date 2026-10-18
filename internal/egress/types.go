@@ -66,10 +66,14 @@ type StoreHooks struct {
 type Options struct {
 	StoreHooks    *StoreHooks
 	BaseTransport *http.Transport
-	AllowedCIDRs  []string
-	ProbeURL      string
-	ProbeHTTPSURL string // Test-only dual-phase override; never accepted by the management API.
-	Resolver      Resolver
+	// IsolateAccountConnections separates account RPC/SSE connection pools.
+	// OAuth and probes still use their pre-identity slot-generation pool.
+	// False preserves the original slot-level connection reuse policy.
+	IsolateAccountConnections bool
+	AllowedCIDRs              []string
+	ProbeURL                  string
+	ProbeHTTPSURL             string // Test-only dual-phase override; never accepted by the management API.
+	Resolver                  Resolver
 	// FailureCooldown bounds a transport-fault pause. Zero uses 15 seconds.
 	// It is a process policy, not persisted or writable via management APIs.
 	FailureCooldown time.Duration
@@ -115,10 +119,15 @@ type RouteStatus struct {
 	RetryAfter int    `json:"retry_after,omitempty"`
 }
 type generation struct {
-	transport *http.Transport
-	refs      int
-	callers   atomic.Int64
-	retired   bool
+	transport      *http.Transport
+	refs           int
+	callers        atomic.Int64
+	retired        bool
+	slotID         string
+	slotGeneration uint64
+	accountUID     string
+	accountBound   bool
+	lastUsed       uint64
 }
 type RouteHandle struct {
 	SlotID       string
@@ -156,6 +165,9 @@ type Manager struct {
 	snapshot     atomic.Pointer[Config]
 	allowed      []*net.IPNet
 	transports   map[string]*generation
+	accountPools map[string]string
+	poolSequence uint64
+	poolClock    uint64
 	unavailable  map[string]time.Time
 	waf          map[string]time.Time
 }
