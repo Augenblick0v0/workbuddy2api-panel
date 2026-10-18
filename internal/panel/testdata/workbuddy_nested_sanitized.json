@@ -1,0 +1,14 @@
+{
+  "account": {
+    "enterpriseId": "fixture-enterprise",
+    "nickname": "fixture nickname",
+    "uid": "attachment-fixture-uid"
+  },
+  "auth": {
+    "accessToken": "synthetic-attachment-access",
+    "domain": "www.codebuddy.cn",
+    "expiresAt": 1794713372,
+    "realm": "cn",
+    "refreshToken": "synthetic-attachment-refresh"
+  }
+}
