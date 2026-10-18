@@ -10,6 +10,9 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
 
+// cnDesktopReportUA CN 桌面端出站 UA 的期望值（身份矩阵默认，E3 实测形态）。
+const cnDesktopReportUA = "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"
+
 // TestReportDesktopEventFingerprint 断言桌面指纹上报：走 chatBase、UA 为桌面形状、
 // 事件数组自动注入 workbuddy-desktop 公共指纹（覆盖同名业务键）。
 func TestReportDesktopEventFingerprint(t *testing.T) {
@@ -40,8 +43,9 @@ func TestReportDesktopEventFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("report desktop: %v", err)
 	}
-	if gotUA != desktopUA {
-		t.Errorf("UA=%q want %q", gotUA, desktopUA)
+	// CN 桌面端 UA 取身份矩阵默认值（E3 实测 5.5.6 / CLI 2.137.1）。
+	if gotUA != cnDesktopReportUA {
+		t.Errorf("UA=%q want %q", gotUA, cnDesktopReportUA)
 	}
 	if len(got) != 1 {
 		t.Fatalf("events=%d want 1", len(got))
@@ -102,7 +106,7 @@ func TestSetAppearanceTheme(t *testing.T) {
 		if r.URL.Path != "/v2/user-asset/appearance/set" {
 			t.Errorf("path=%s want /v2/user-asset/appearance/set", r.URL.Path)
 		}
-		if r.Header.Get("User-Agent") != desktopUA {
+		if r.Header.Get("User-Agent") != cnDesktopReportUA {
 			t.Errorf("UA=%q want desktop UA", r.Header.Get("User-Agent"))
 		}
 		raw, _ := io.ReadAll(r.Body)

@@ -17,8 +17,9 @@ func TestProtocolDiagnosticsProfilesUseExistingEffectiveSettings(t *testing.T) {
 		if p.Realm == "global" {
 			a.Domain = "www.workbuddy.ai"
 		}
-		if p.UserAgent != c.userAgent(a) || p.ClientVersion != c.clientVersion() ||
-			p.CLIVersion != c.cliVersion() || p.ClientName != c.attributionClientName() || p.UAOverride {
+		spec := c.desktopSpecBase(a)
+		if p.UserAgent != c.userAgent(a) || p.ClientVersion != spec.ClientVersion ||
+			p.CLIVersion != spec.CLIVersion || p.ClientName != c.attributionClientName() || p.UAOverride {
 			t.Fatalf("not effective configuration: %+v", p)
 		}
 	}

@@ -102,7 +102,12 @@ func TestProtocolDiagnosticsOfflineRedactedRoutesAndSchema(t *testing.T) {
 		StrictCooldown bool                        `json:"strict_cooldown"`
 		Accounts       []protocolAccountDiagnostic `json:"accounts"`
 		Profiles       []upstream.ProtocolProfile  `json:"profiles"`
-		Warnings       []string                    `json:"warnings"`
+		// 身份矩阵（规格 §5）：用途行带身份/版本/归属头取值，另有独立 identities 三行。
+		PurposeProfiles              []upstream.ProtocolPurposeProfile `json:"purpose_profiles"`
+		Identities                   []upstream.IdentityProfile        `json:"identities"`
+		DeviceIDPolicy               string                            `json:"device_id_policy"`
+		InternationalIdentityUpgrade string                            `json:"international_identity_upgrade"`
+		Warnings                     []string                          `json:"warnings"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
@@ -118,6 +123,56 @@ func TestProtocolDiagnosticsOfflineRedactedRoutesAndSchema(t *testing.T) {
 		if a.UID == "b" && (a.Route.State != "direct" || a.Route.SlotID != "" || a.DeviceToken.Source != "global") {
 			t.Fatalf("direct route/token diagnostic: %+v", a)
 		}
+	}
+	// ── 身份矩阵断言（规格 §5）──
+	if result.DeviceIDPolicy != "per_account_stable_desktop_unified_mp_unique" ||
+		result.InternationalIdentityUpgrade != "applied_global_desktop_5_8_4" {
+		t.Fatalf("identity policy flags: %q / %q", result.DeviceIDPolicy, result.InternationalIdentityUpgrade)
+	}
+	if len(result.PurposeProfiles) != 8 {
+		t.Fatalf("purpose_profiles rows = %d want 8", len(result.PurposeProfiles))
+	}
+	for _, row := range result.PurposeProfiles {
+		if row.Identity != "workbuddy-desktop" {
+			t.Fatalf("purpose row identity = %q (realm=%s purpose=%s)", row.Identity, row.Realm, row.Purpose)
+		}
+		wantVersion := "fixture-client" // 显式 client_version 覆盖矩阵默认
+		if row.ClientVersion != wantVersion || row.IdeVersion != wantVersion {
+			t.Fatalf("purpose row versions = %q/%q want %q", row.ClientVersion, row.IdeVersion, wantVersion)
+		}
+		isBilling := row.Purpose == "billing"
+		if isBilling && (row.MachineHeader || row.SessionHeader || row.PrivateData || row.AgentIntent != "" || row.Origin != "") {
+			t.Fatalf("billing row must stay header-free: %+v", row)
+		}
+		if !isBilling && (!row.MachineHeader || !row.SessionHeader) {
+			t.Fatalf("non-billing row must keep machine/session headers: %+v", row)
+		}
+		if !isBilling && row.Realm == "global" {
+			if row.AgentIntent != "craft" || row.AgentType != "main" || !row.PrivateData {
+				t.Fatalf("global row attribution missing: %+v", row)
+			}
+		} else if row.AgentIntent != "" || row.AgentType != "" || row.PrivateData {
+			t.Fatalf("CN row must not claim intl attribution: %+v", row)
+		}
+	}
+	if len(result.Identities) != 3 {
+		t.Fatalf("identities rows = %d want 3", len(result.Identities))
+	}
+	byKey := map[string]upstream.IdentityProfile{}
+	for _, id := range result.Identities {
+		byKey[id.Realm+"/"+id.Identity] = id
+	}
+	// 小程序端版本固定 2.4.0：不跟随桌面端 client_version 覆盖（零漂移）。
+	mp := byKey["cn/workbuddy-mp"]
+	if mp.ClientVersion != "2.4.0" || mp.IdeVersion != "2.4.0" || mp.UserAgent != "" || mp.Product != "SaaS" {
+		t.Fatalf("mp identity row: %+v", mp)
+	}
+	cn := byKey["cn/workbuddy-desktop"]
+	if !strings.Contains(cn.UserAgent, "WorkBuddy/") || strings.Contains(cn.UserAgent, "workbuddy-ai") {
+		t.Fatalf("cn desktop identity UA: %q", cn.UserAgent)
+	}
+	if cn.Language != "zh-CN" || cn.Origin != "https://www.codebuddy.cn" {
+		t.Fatalf("cn desktop identity origin/language: %+v", cn)
 	}
 	pl.SetStrictCooldown(false)
 	p.cfg.Egress = nil

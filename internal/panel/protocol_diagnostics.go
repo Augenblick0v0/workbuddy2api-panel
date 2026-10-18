@@ -91,8 +91,9 @@ func (p *Panel) protocolDiagnostics(w http.ResponseWriter, r *http.Request) {
 		"api_account_device_token_only":  p.cfg.Upstream.AccountDeviceTokenOnly.Load(),
 		"account_connection_isolation":   isolation,
 		"disabled_account_alerts":        alerts,
-		"device_id_policy":               "existing_ids_preserved_no_migration",
-		"international_identity_upgrade": "not_applied",
+		"device_id_policy":               "per_account_stable_desktop_unified_mp_unique",
+		"international_identity_upgrade": "applied_global_desktop_5_8_4",
+		"identities":                     p.cfg.Upstream.IdentityProfiles(),
 		"warnings":                       warnings,
 	})
 }

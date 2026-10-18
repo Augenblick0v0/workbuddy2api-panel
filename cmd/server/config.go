@@ -138,10 +138,11 @@ type Config struct {
 		// 全部出站请求生效：chat/refresh/checkin/balance/report/travel/FetchModels。
 		// 默认值已对齐官方 WorkBuddy 桌面形态（三段式），用户仍可配完全自定义值改写。
 		UserAgent string `json:"user_agent"`
-		// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` 与归属头
-		// X-IDE-Version）。空 = 内置默认（对齐官方 5.5.4 分发包）。
+		// ClientVersion 客户端版本段（出站 UA 的版本段 + 归属头 X-IDE-Version +
+		// 上报体 ideVersion/extVersion）。空 = 身份矩阵默认（按账号 realm 取桌面端
+		// 版本，见 internal/upstream/protocol_profile.go；小程序端版本不跟随本字段）。
 		ClientVersion string `json:"client_version"`
-		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认（官方内置 CLI 2.137.1）。
+		// CliVersion 出站 UA 中 CLI 段的版本。空 = 身份矩阵默认（CN/global 各自实测值）。
 		CliVersion string `json:"cli_version"`
 		// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
 		// 空 = 旧行为 X-Product="SaaS" 不设 X-IDE-*；配 "WorkBuddy" 则四头跟随。

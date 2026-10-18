@@ -45,6 +45,7 @@ docs/
 !docs/proxy-design.md
 !docs/proxy-acceptance.md
 !docs/account-proxy.md
+!docs/identity-upgrade.md
 .playwright-cli/
 output/playwright/
 

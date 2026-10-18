@@ -59,20 +59,27 @@ const mpReportPath = "/v2/report"
 const schoolOpenDayActivityID = "school_open_day_2026"
 
 // mpEventBase 小程序埋点公共指纹（appservice wQ()+Ao() 对齐）。
-func mpEventBase(a *auth.Auth) map[string]any {
+//
+// 版本与 IDE 字段取自身份矩阵 mpSpec（CN 小程序实测值），machineId 改为
+// **逐账号唯一**的 UUIDv4 形态（device_identity.go 的 mpMachineID）：
+// 旧实现是全体账号共享一个硬编码常量，多账号同设备指纹本身就是风控暴露面，
+// 这是本次唯一一次「有意的」设备 ID 变更（规格 §1 第 4 条 / 用户明确要求）；
+// 其余字段与事件形状一律不变。
+func (c *Client) mpEventBase(a *auth.Auth) map[string]any {
+	spec := c.mpSpec(a)
 	return map[string]any{
 		"timestamp":    time.Now().UnixMilli(),
-		"ideType":      "WorkBuddy_MP",
-		"ideVersion":   "2.4.0",
+		"ideType":      spec.IdeType,
+		"ideVersion":   spec.ClientVersion,
 		"extName":      "workbuddy-mp",
-		"extVersion":   "2.4.0",
-		"product":      "SaaS",
-		"ideName":      "wx_app_cloud",
+		"extVersion":   spec.ClientVersion,
+		"product":      spec.Product,
+		"ideName":      spec.IdeName,
 		"platform":     "mini_program",
 		"os":           "windows",
 		"osVersion":    "11",
 		"arch":         "x64",
-		"machineId":    "0655736a-607f-4d9d-b430-58176ee9a090",
+		"machineId":    mpMachineID(a.UID),
 		"timezone":     "Asia/Shanghai",
 		"userId":       a.UID,
 		"userNickname": a.Nickname,
@@ -84,7 +91,7 @@ func (c *Client) ReportMPEvent(a *auth.Auth, events ...map[string]any) error {
 	if len(events) == 0 {
 		return fmt.Errorf("mp report: no events")
 	}
-	base := mpEventBase(a)
+	base := c.mpEventBase(a)
 	arr := make([]map[string]any, 0, len(events))
 	for _, ev := range events {
 		m := map[string]any{}
@@ -111,7 +118,8 @@ func (c *Client) ReportMPEvent(a *auth.Auth, events ...map[string]any) error {
 		req.Header.Set("X-User-Id", a.UID)
 	}
 	req.Header.Set("X-Client-Product", "workbuddy-mp")
-	req.Header.Set("X-Client-Version", "2.4.0")
+	// 版本取身份矩阵（CN 小程序实测值），头集合与取值语义不变。
+	req.Header.Set("X-Client-Version", c.mpSpec(a).ClientVersion)
 	req.Header.Set("X-Client-Platform", "mp-weixin")
 	req.Header.Set("X-Platform", "wechatmp")
 	_, err = c.doJSON(req, a)
@@ -153,7 +161,7 @@ func SchoolSeasonChatEvent(conversationID string) map[string]any {
 // app-service.js 的真实发射点（上游 task_runner 实测 2026-09-23：上报即 completed，
 // claim +200c+5e）。与 school 域的 SchoolExpertUseEvents 是**两套口径**，勿照抄：
 //   - 不带 conversationId/activityId——真实事件就是这两个字段都不带；
-//   - extVersion 用小程序自身版本 2.2.8（覆盖 mpEventBase 的 2.4.0）；
+//   - extVersion 用小程序自身版本 2.2.8（覆盖 mpEventBase 的矩阵默认版本）；
 //   - source=mini_program + type 固定 "send_message"（小程序恒发此值）。
 //
 // expertID 必须是专家市场真实 ex_ id（ListMarketExperts），空 id 服务端不入账。

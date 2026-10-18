@@ -1,11 +1,11 @@
-// desktop.go 桌面客户端（WorkBuddy Desktop 5.5.6）行为指纹上报。
+// desktop.go 桌面客户端行为指纹上报（客户端版本 / UA / 设备标识来自身份矩阵）。
 //
 // 来源：2026-09-12 Sunny 抓包实测（data/desktop-task-protocol.md）。桌面端点亮
 // 「需电脑端」类任务的关键不是独立端点，而是同一 POST /v2/report 通道上
 // **不同的客户端指纹**：
 //
 //	POST https://copilot.tencent.com/v2/report        ← chatBase（CLI 上报走 billingBase）
-//	User-Agent: WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1
+//	User-Agent: 官方桌面端三段式，取值见 protocol_profile.go 身份矩阵（CN 与国际版不同）
 //	X-Domain: copilot.tencent.com, X-Product: SaaS, X-User-Id: <uid>
 //	Body: [ {...event...} ]                           ← 数组
 //
@@ -23,8 +23,6 @@ package upstream
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,25 +37,22 @@ import (
 const (
 	desktopReportPath    = "/v2/report"
 	desktopAppearanceSet = "/v2/user-asset/appearance/set"
-	// desktopUA 实测桌面客户端 UA（5.5.6 内嵌 CLI 2.137.1）。
-	desktopUA = "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"
+	// desktopInstallDir 桌面客户端安装目录名（仅用于 pageURL 载荷拼接；
+	// 只存目录名、不存整段安装路径，避免与 UA 品牌段字面量混淆）。
+	desktopInstallDir = "WorkBuddy"
 )
 
 // desktopBase 桌面端 /v2/report 与 user-asset 走 chatBase（copilot.tencent.com）。
 func (c *Client) desktopBase(a *auth.Auth) string { return c.chatBase(a) }
 
-// deriveID 由 uid 稳定派生一个 36 位 hex 设备标识（machineId/qimei36 复用），
-// 幂等：同一账号每次生成相同值，模拟固定设备。
-func deriveID(a *auth.Auth, salt string) string {
-	sum := sha256.Sum256([]byte(salt + ":" + a.UID))
-	return hex.EncodeToString(sum[:18]) // 36 hex chars
-}
-
 // DesktopEvent 桌面端事件：业务字段任意（map），公共指纹由 ReportDesktopEvent 注入。
 type DesktopEvent map[string]any
 
 // desktopFingerprint 公共桌面指纹字段（注入每个事件，覆盖同名业务键）。
-func desktopFingerprint(a *auth.Auth) map[string]any {
+// 版本号与设备标识都走身份矩阵 / device_identity.go：machineId / sessionId 的
+// 取值与升级前逐账号完全一致（规格 §1 第 4 条：既有账号设备 ID 零变更）。
+func (c *Client) desktopFingerprint(a *auth.Auth) map[string]any {
+	spec := c.desktopSpecBase(a)
 	now := time.Now().UnixMilli()
 	return map[string]any{
 		"timezone":     "Asia/Shanghai",
@@ -68,13 +63,13 @@ func desktopFingerprint(a *auth.Auth) map[string]any {
 		"product":      "SaaS",
 		"releaseDate":  int64(1789036585355),
 		"commit":       "5f9692923c93033111c51ad7b003eb80204a9b75",
-		"ideName":      "WorkBuddy",
-		"ideType":      "WorkBuddy",
-		"ideVersion":   "5.5.6",
-		"machineId":    deriveID(a, "machine"),
-		"sessionId":    deriveID(a, "session"),
+		"ideName":      spec.IdeName,
+		"ideType":      spec.IdeType,
+		"ideVersion":   spec.ClientVersion,
+		"machineId":    desktopMachineID(a.UID),
+		"sessionId":    desktopSessionID(a.UID),
 		"extName":      "workbuddy-desktop",
-		"extVersion":   "5.5.6",
+		"extVersion":   spec.ClientVersion,
 		"os":           "win32",
 		"arch":         "x64",
 		"osVersion":    "10.0.26220",
@@ -92,7 +87,7 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	if len(events) == 0 {
 		return fmt.Errorf("desktop report: no events")
 	}
-	fp := desktopFingerprint(a)
+	fp := c.desktopFingerprint(a)
 	arr := make([]map[string]any, 0, len(events))
 	for _, ev := range events {
 		m := map[string]any{}
@@ -115,7 +110,8 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
-	req.Header.Set("User-Agent", desktopUA)
+	// UA 走身份矩阵：CN / global 分别对应各自实测版本与品牌段（E1/E3）。
+	req.Header.Set("User-Agent", c.desktopSpec(a).UserAgent)
 	req.Header.Set("X-Domain", c.desktopBase(a))
 	req.Header.Set("X-Product", "SaaS")
 	req.Header.Set("X-Request-ID", deriveID(a, "req")+fmt.Sprintf("%d", time.Now().UnixNano()%1e6))
@@ -216,7 +212,7 @@ func (c *Client) SetAppearanceTheme(a *auth.Auth, resourceKey string) error {
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
-	req.Header.Set("User-Agent", desktopUA)
+	req.Header.Set("User-Agent", c.desktopSpec(a).UserAgent)
 	req.Header.Set("X-Product", "SaaS")
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
@@ -296,7 +292,7 @@ func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, ele
 
 // ---------------------------------------------------------------------------
 // 2026-09-12 第五轮：客户端 asar 逆向 + Sunny 真实样本驱动的新判据（三账号实测点亮）。
-// 来源：WorkBuddy.exe 5.5.6 app.asar 渲染层事件枚举/载荷 + 抓包真实专家召唤样本
+// 来源：WorkBuddy.exe app.asar 渲染层事件枚举/载荷 + 抓包真实专家召唤样本
 // （data/desktop-task-protocol.md §7.3）。
 // ---------------------------------------------------------------------------
 
@@ -393,7 +389,7 @@ func (c *Client) MarketExpertList(a *auth.Auth, expertType string) ([]MarketExpe
 	}
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", desktopUA)
+	req.Header.Set("User-Agent", c.desktopSpec(a).UserAgent)
 	req.Header.Set("X-Domain", c.chatBase(a))
 	req.Header.Set("X-Product", "SaaS")
 	if a.UID != "" {
@@ -437,21 +433,28 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	if err != nil {
 		return "", "", err
 	}
+	spec := c.desktopSpec(a)
 	h := req.Header
 	h.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	h.Set("Content-Type", "application/json")
 	h.Set("Accept", "text/event-stream")
-	h.Set("User-Agent", desktopUA)
+	h.Set("User-Agent", spec.UserAgent)
 	h.Set("X-Domain", c.chatBase(a))
 	h.Set("X-Product", "SaaS")
 	h.Set("X-User-Id", a.UID)
 	h.Set("X-Conversation-ID", conversationID)
 	h.Set("X-Request-ID", fmt.Sprintf("%d", time.Now().UnixNano()))
-	h.Set("X-Agent-Intent", "craft")
-	h.Set("X-Agent-Type", "main")
-	h.Set("X-IDE-Name", "WorkBuddy")
-	h.Set("X-IDE-Type", "WorkBuddy")
-	h.Set("X-IDE-Version", "5.5.6")
+	// 本地任务链路历史一直发 craft/main（CN 亦然），取值统一放身份矩阵避免散落；
+	// 头集合不变（规格 §3：其余既有头保持）。
+	h.Set("X-Agent-Intent", desktopTaskAgentIntent)
+	h.Set("X-Agent-Type", desktopTaskAgentType)
+	h.Set("X-IDE-Name", spec.IdeName)
+	h.Set("X-IDE-Type", spec.IdeType)
+	h.Set("X-IDE-Version", spec.ClientVersion)
+	// global 对齐国际版桌面端抓包（E1）：私有数据声明头。
+	if spec.PrivateData {
+		h.Set("X-Private-Data", "true")
+	}
 	h.Set("x-codebuddy-request", "1")
 	if expertID != "" {
 		h.Set("X-Expert-Id", expertID)
@@ -537,7 +540,7 @@ func DesktopExpertSummonSequence(e MarketExpert) []DesktopEvent {
 		{
 			"eventCode": "web_element_click", "source": e.ExpertID, "type": cat, "version": ver,
 			"elementId": "expert_summon_click", "elementName": "立即召唤",
-			"pageURL": "/C:/Program%20Files/WorkBuddy/resources/app.asar/renderer/index.html",
+			"pageURL": "/C:/Program%20Files/" + desktopInstallDir + "/resources/app.asar/renderer/index.html",
 		},
 		{
 			"eventCode": "expert_summon_click", "id": e.ExpertID, "name": e.DisplayNameZH,

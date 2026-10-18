@@ -1045,16 +1045,26 @@ function protocolDiagnosticsText(d) {
     '任务上报及专用指纹：保持原样；本页不发送任何上游请求。',
     'API 聊天仅用账号专属设备 Token：' + (d.api_account_device_token_only ? '开启' : '关闭'),
     '账号级连接池隔离：' + (d.account_connection_isolation ? '开启' : '关闭'),
-    '设备标识：保留现有值，未批量更换；国际版身份特征未自动升级。',
+    '身份矩阵：国际版桌面端 5.8.4 / CLI 2.161.0 / UA 品牌段 workbuddy-ai；CN 桌面端保持 5.5.6 / CLI 2.137.1；小程序端 2.4.0。',
+    '设备标识：桌面端逐账号保持原值（升级不改设备 ID，上报 machineId/sessionId 与 X-Machine-ID/X-Session-ID 同源）；小程序端升级后逐账号唯一；本页不显示任何设备 ID。',
   ];
   for (const p of d.profiles || []) {
     lines.push('[' + p.realm + '] UA: ' + p.user_agent,
       '客户端 ' + p.client_version + ' / CLI ' + p.cli_version + ' / 归属 ' + p.client_name + (p.ua_override ? '（自定义 UA）' : ''));
   }
+  for (const id of d.identities || []) {
+    lines.push('身份 [' + id.realm + '/' + id.identity + '] UA：' + (id.user_agent || '不发送') +
+      '；客户端 ' + id.client_version + ' / CLI ' + (id.cli_version || '无') + ' / IDE ' + id.ide_version +
+      '；Origin：' + (id.origin || '不发送') + '；语言：' + (id.language || '不发送') + '；产品：' + id.product);
+  }
   for (const p of d.purpose_profiles || []) {
-    lines.push('用途 [' + p.realm + '/' + p.purpose + '] 目标：' + (p.endpoint_origin || '未设置') +
+    lines.push('用途 [' + p.realm + '/' + p.purpose + '] 身份：' + p.identity +
+      '；目标：' + (p.endpoint_origin || '未设置') +
       '；Origin：' + (p.origin || '不发送') + '；Referer：' + (p.referer || '不发送') +
-      '；语言：' + p.language + '；机器/会话头：' + (p.machine_header ? '有' : '无') + '/' + (p.session_header ? '有' : '无'));
+      '；语言：' + p.language + '；IDE ' + p.ide_version +
+      '；X-Agent：' + (p.agent_intent || '不发送') + '/' + (p.agent_type || '不发送') + '/' + (p.agent_purpose || '不发送') +
+      '；私标：' + (p.private_data ? '发送' : '不发送') +
+      '；机器/会话头：' + (p.machine_header ? '有' : '无') + '/' + (p.session_header ? '有' : '无'));
   }
   for (const a of d.accounts || []) {
     const t = a.device_token || {}, r = a.route || {};

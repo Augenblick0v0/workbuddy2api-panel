@@ -202,7 +202,9 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 		return ch
 	}
 	// 桌面端 UA（主路）：项目 chat 路径实际使用的 UA，与官方客户端看到的目录同源。
-	// 按账号 realm 生成（global → `WorkBuddy AI` 平台段），故必须传 a 而非用常量。
+	// 取值来自身份矩阵（按账号 realm 切版本与品牌段），故必须传 a 而非用常量。
+	// E2 实测：CN 与 global 各自「升级前 vs 升级后」的 /v3/config 目录对比差异集
+	// 为空（CN 60 个、global 27 个）——升级 UA 版本与品牌段不影响模型目录。
 	v3DesktopCh := probeV3(c.defaultWorkBuddyUAFor(a))
 	v3IDECh := probeV3(codeBuddyIDEUA)
 	v3CLICh := probeV3(codeBuddyCLIUA)

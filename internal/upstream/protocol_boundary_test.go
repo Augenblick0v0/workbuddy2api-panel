@@ -79,8 +79,18 @@ func TestProtocolPurposeMatrixAndSafeEndpointPreview(t *testing.T) {
 		if p.Purpose == "billing" && (p.Origin != "" || p.MachineHeader || p.SessionHeader) {
 			t.Fatal("billing diagnostic invented headers")
 		}
-		if p.Realm == "cn" && p.Purpose == "chat" && p.UserAgent != "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1" {
+		// CN 零漂移：身份矩阵里的 CN 桌面端 UA（E3 实测 5.5.6 / CLI 2.137.1）。
+		if p.Realm == "cn" && p.Purpose == "chat" && p.UserAgent != "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1" {
 			t.Fatal("CN identity changed")
+		}
+		// global（E1）：国际版 5.8.4 + workbuddy-ai 品牌段。
+		if p.Realm == "global" && p.Purpose == "chat" &&
+			p.UserAgent != "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0" {
+			t.Fatalf("global identity not upgraded: %q", p.UserAgent)
+		}
+		// 身份名：桌面端统一标识，不再沿用旧的 existing_workbuddy。
+		if p.Identity != "workbuddy-desktop" {
+			t.Fatalf("purpose profile identity = %q", p.Identity)
 		}
 	}
 }

@@ -644,16 +644,18 @@ type Client struct {
 	SanitizeFingerprints atomic.Bool
 
 	// UserAgent 出站 User-Agent 显式覆盖（非空时全路径生效，优先于默认三段式）。
-	// 空 = 默认官方形态：chat/refresh/FetchModels 走
-	// `WorkBuddy/<ver> WorkBuddy/<ver> CLI/<cliVer>`；billing 走 `WorkBuddy/<ver>`
-	// （仅当 client_name 非空）。
+	// 空 = 默认官方形态（按账号 realm 取身份矩阵 protocol_profile.go）：
+	// chat/refresh/FetchModels 走官方桌面端三段式；billing 走单段短形态
+	// （仅当 client_name 非 "SaaS"）。
 	UserAgent string
 
-	// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` + X-IDE-Version）。
-	// 空 = 内置默认（对齐官方 5.5.4 分发包）。
+	// ClientVersion 客户端版本段（出站 UA 的两处版本段 + X-IDE-Version + 上报体
+	// ideVersion/extVersion + billing 短 UA）。空 = 身份矩阵默认（CN/global 桌面端
+	// 各自取值，证据 E1/E3；小程序端版本独立且不跟随本字段）。
 	ClientVersion string
 
-	// CliVersion 出站 UA 中 `CLI/<ver>` 段版本。空 = 内置默认（官方内置 CLI 2.137.1）。
+	// CliVersion 出站 UA 中 CLI 段版本。空 = 身份矩阵默认（CN/global 各自实测值，
+	// 证据 E1/E3）。
 	CliVersion string
 
 	// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
