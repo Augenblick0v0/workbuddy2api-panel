@@ -122,6 +122,9 @@ type Handler struct {
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP     wafIPGate
 	wafRoutes routeWAFGates
+	// restricted 风控 11140 连坐保护状态机（restricted.go）：单号命中即停轮转；
+	// 短窗多号波形 → 整域池暂停。进程内状态、重启清零。
+	restricted restrictedGate
 }
 
 // NewHandler 构建 handler。
@@ -1010,6 +1013,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			}
+			// 风控 11140（unusual activity 形态）止损（Hub #422 复盘红线）：**立即终止
+			// 轮转**——同设备指纹换号会连坐，继续换号等于把整池账号逐个送上去。账号
+			// 长冷却已在 applyErrorPolicy 记账；短窗多号波形 → 整域池暂停 30m。
+			// 错误原文透传 + hint 给出申诉口径（1-3 个工作日自动解除）。
+			if kind == upstream.ErrAccountRestricted {
+				h.restricted.noteRestricted(acct.UID, acct.Realm(), func() {
+					h.pauseRealmCooldowns(acct.Realm())
+				})
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "account restricted by upstream risk control (403/11140)"
+				}
+				writeOpenAIErrorHint(w, http.StatusForbidden, "account_restricted", msg,
+					"上游已对该账号做风控限制（403/11140）；网关已冷却该账号并停止换号重试（同设备账号会连坐）。请勿高频重试，按官方渠道申诉，通常 1-3 个工作日自动解除。")
+				st.status = http.StatusForbidden
+				st.outcome = reqlog.OutcomeHTTPError
+				return
+			}
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
@@ -1470,6 +1491,12 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 			return
 		}
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), "account fault (14017)")
+	case upstream.ErrAccountRestricted:
+		// 风控限制（403/11140 unusual activity 形态）：长冷却 2h（官方口径 1-3 个
+		// 工作日自动解除，2h 是「少服务一会儿也不送号」的保守值；Hub 同值），
+		// **不 Disable**（临时状态，与 request illegal 的授权封禁分野）。持久化随
+		// 既有冷却状态；handler 侧另做止损停轮转 + 波形整池暂停（见 chatCompletions）。
+		h.cfg.Pool.Cooldown(uid, pool.CoolHard, 2*time.Hour, "risk-control 403/11140 restricted (2h)")
 	case upstream.ErrServer:
 		// 5xx 上游故障：Classify 已把 ≥500 判为 ErrServer，在此喂熔断计数（不再手写 status>=500）。
 		h.cfg.Pool.NoteError(uid)

@@ -345,10 +345,13 @@ func TestNormalizeToolPatterns(t *testing.T) {
 	})
 
 	t.Run("bare tool parameters form normalized", func(t *testing.T) {
+		// 裸根级工具（name+parameters 平铺）经 normalizeToolsSchema 自动包装为
+		// {type:function, function:{...}}（11129 根因修复：上游拒收非包装形态），
+		// pattern 归一在包装后的 function.parameters 路径上生效。
 		bs := string(byte(92))
 		body := `{"messages":[],"tools":[{"name":"t","parameters":{"properties":{"id":{"pattern":"p` + bs + bs + `_q"}}}}]}`
 		out := string(PrepareBodyOptWithEfforts([]byte(body), false, nil))
-		if got := lookupPattern(t, out, "tools", 0, "parameters", "properties", "id", "pattern"); got != "p_q" {
+		if got := lookupPattern(t, out, "tools", 0, "function", "parameters", "properties", "id", "pattern"); got != "p_q" {
 			t.Fatalf("bare parameters pattern = %q, want %q", got, "p_q")
 		}
 	})

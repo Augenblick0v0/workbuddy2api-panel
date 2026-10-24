@@ -43,6 +43,7 @@ const (
 	ErrWafBlock                      // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避
 	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
+	ErrAccountRestricted             // 403/11140 风控限制（unusual activity 国际形态）→ 长冷却 + 止损停轮转 + 波形整池暂停（同设备指纹换号会连坐）
 	ErrClient                        // 其他 4xx / 业务错误
 )
 
@@ -72,6 +73,8 @@ func (k ErrKind) String() string {
 		return "image_invalid"
 	case ErrAccountFault:
 		return "account_fault"
+	case ErrAccountRestricted:
+		return "account_restricted"
 	case ErrClient:
 		return "client"
 	default:
@@ -142,6 +145,18 @@ var accountFaultMarkers = []string{
 	"request illegal",
 	"trial not activated",
 	"trial version is not yet activated",
+}
+
+// accountRestrictedMarkers 风控限制形态（国际版 403 / code 11140 'account
+// restricted due to unusual activity'）。与 "request illegal" 的授权封禁不同：
+// 风控限制是账号级临时状态（官方口径 1-3 个工作日自动解除），且**同设备指纹
+// 换号会连坐**（社区复盘 #422：一次任务轮转走完 7 个号全被封）——分类到
+// ErrAccountRestricted：长冷却 + 停止换号 + 波形整池暂停，绝不 Disable。
+var accountRestrictedMarkers = []string{
+	"unusual activity",
+	"account has been restricted",
+	"account restricted due to",
+	"账号存在异常行为",
 }
 
 // contentBlockedMarkers 内容策略拦截关键词（大小写不敏感子串匹配）。
@@ -529,6 +544,14 @@ func Classify(status int, body string) ErrKind {
 		for _, m := range accountFaultMarkers {
 			if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
 				return ErrAccountFault
+			}
+		}
+		// 风控限制形态（先于 accountFault 之外的通用层；与 request illegal 无词面
+		// 重叠，先后无所谓，放此处保持「账号级终态 → 账号级故障 → 风控限制」的
+		// 语义次序紧凑）。
+		for _, m := range accountRestrictedMarkers {
+			if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
+				return ErrAccountRestricted
 			}
 		}
 	}

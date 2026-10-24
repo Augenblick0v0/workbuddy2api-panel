@@ -49,6 +49,10 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 		obj["stream_options"] = map[string]any{"include_usage": true}
 	}
 	normalizeToolChoice(obj)
+	// 工具 Schema 深度规整（11129 安全网，见 tool_schema.go）：类型别名/null 元数据/
+	// Tuple items/裸工具包装。先于 normalizeToolPatterns（同为「让请求通过」的
+	// 无害化改写，互不冲突）。
+	normalizeToolsSchema(obj)
 	normalizeToolPatterns(obj)
 	normalizeRoles(obj)
 	normalizeImageURL(obj)
