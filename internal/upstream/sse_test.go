@@ -1,6 +1,8 @@
 package upstream
 
 import (
+	"bytes"
+	"io"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -421,17 +423,17 @@ func TestNormalizeFrame(t *testing.T) {
 			map[string]any{"choices": []any{
 				map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{map[string]any{"id": "c1", "type": "function"}}}},
 			}},
-			`{"choices":[{"delta":{"tool_calls":[{"id":"c1","type":"function"}]},"finish_reason":null,"index":0}],"id":"chatcmpl-wb2api","object":"chat.completion.chunk","usage":null}`},
+			`{"choices":[{"delta":{"tool_calls":[{"id":"c1","type":"function"}]},"finish_reason":null,"index":0}],"id":"chatcmpl-wb2api-test","object":"chat.completion.chunk","usage":null}`},
 		{"empty tool_calls list dropped",
 			map[string]any{"choices": []any{
 				map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{}, "content": "hi"}},
 			}},
-			`{"choices":[{"delta":{"content":"hi"},"finish_reason":null,"index":0}],"id":"chatcmpl-wb2api","object":"chat.completion.chunk","usage":null}`},
+			`{"choices":[{"delta":{"content":"hi"},"finish_reason":null,"index":0}],"id":"chatcmpl-wb2api-test","object":"chat.completion.chunk","usage":null}`},
 		{"empty placeholder function_call dropped",
 			map[string]any{"choices": []any{
 				map[string]any{"index": 0, "delta": map[string]any{"function_call": map[string]any{"name": "", "arguments": ""}}},
 			}},
-			`{"choices":[{"delta":{},"finish_reason":null,"index":0}],"id":"chatcmpl-wb2api","object":"chat.completion.chunk","usage":null}`},
+			`{"choices":[{"delta":{},"finish_reason":null,"index":0}],"id":"chatcmpl-wb2api-test","object":"chat.completion.chunk","usage":null}`},
 		{"top-level unknown fields dropped, usage null when absent",
 			map[string]any{"id": "x", "object": "chat.completion.chunk", "created": 1, "junk": "noise", "choices": []any{
 				map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"},
@@ -440,7 +442,7 @@ func TestNormalizeFrame(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			raw, err := json.Marshal(normalizeFrame(c.in))
+			raw, err := json.Marshal(normalizeFrame(c.in, "chatcmpl-wb2api-test"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -541,8 +543,9 @@ func TestStreamFirstIdPassthrough(t *testing.T) {
 	}
 }
 
-// TestStreamNoIdFallsBackToSentinel 全流无任何真实 id → 兜底 chatcmpl-wb2api
-// （整流无 id 时的既有哨兵，帧与帧之间仍一惯性存在）。
+// TestStreamNoIdFallsBackToSentinel 全流无任何真实 id → 兜底每流唯一哨兵
+// chatcmpl-wb2api-<hex>（Hub：synthesized 帧动态唯一 chunk id——静态哨兵跨流
+// 重名会让按 id 归并的观测混淆不同请求；同一流内帧间仍保持同一 id）。
 func TestStreamNoIdFallsBackToSentinel(t *testing.T) {
 	raw := "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" +
 		"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{}," +
@@ -552,9 +555,13 @@ func TestStreamNoIdFallsBackToSentinel(t *testing.T) {
 	if len(frames) != 2 {
 		t.Fatalf("frames=%d want 2", len(frames))
 	}
+	first, _ := frames[0]["id"].(string)
+	if !strings.HasPrefix(first, "chatcmpl-wb2api-") || len(first) <= len("chatcmpl-wb2api-") {
+		t.Fatalf("frame 0 id=%q want per-stream unique sentinel", first)
+	}
 	for i, fr := range frames {
-		if got := fr["id"]; got != "chatcmpl-wb2api" {
-			t.Errorf("frame %d id=%v want sentinel chatcmpl-wb2api (无真实 id)", i, got)
+		if got := fr["id"]; got != first {
+			t.Errorf("frame %d id=%v want same per-stream sentinel %q", i, got, first)
 		}
 	}
 }
@@ -930,5 +937,100 @@ func TestCreditPackagesExpiryTimestamp(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("gift pack missing Unix-ms expiry: %+v", packs)
+	}
+}
+
+func TestPeekFirstFrame(t *testing.T) {
+	// 完整首事件 → 返回 prefix 与 frames=1。
+	raw := "data: {\"a\":1}\n\ndata: {\"b\":2}\n\n"
+	pr := &PrefixedReadCloser{Prefix: bytes.NewReader(nil), Rest: io.NopCloser(strings.NewReader(raw))}
+	prefix, frames, err := PeekFirstFrame(pr)
+	if err != nil || frames != 1 {
+		t.Fatalf("peek = (%d, %v), want (1, nil)", frames, err)
+	}
+	if !bytes.Contains(prefix, []byte(`{"a":1}`)) {
+		t.Fatalf("prefix lost first event: %q", prefix)
+	}
+	// 首字节前断流（0 帧 + 读错误）→ frames==0 且带错误。
+	broken := io.NopCloser(io.MultiReader(strings.NewReader(": comment only\n\n"), errReader{}))
+	_, frames2, err2 := PeekFirstFrame(broken)
+	if frames2 != 0 || err2 == nil {
+		t.Fatalf("broken peek = (%d, %v), want (0, err)", frames2, err2)
+	}
+}
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+func TestPrefixedReadCloser(t *testing.T) {
+	var closed bool
+	p := &PrefixedReadCloser{Prefix: bytes.NewReader([]byte("AB")), Rest: &closeFlagReader{closed: &closed}}
+	buf := make([]byte, 4)
+	n, err := io.ReadFull(p, buf)
+	if err != nil || string(buf[:n]) != "ABCD" {
+		t.Fatalf("read = %q %v", buf[:n], err)
+	}
+	if err := p.Close(); err != nil || !closed {
+		t.Fatal("close not propagated")
+	}
+}
+
+type closeFlagReader struct {
+	closed *bool
+}
+
+func (c *closeFlagReader) Read(b []byte) (int, error) {
+	if len(b) >= 2 {
+		return copy(b, "CD"), io.EOF
+	}
+	return 0, nil
+}
+
+func (c *closeFlagReader) Close() error { *c.closed = true; return nil }
+
+func TestStripToolCallNamesFirstFragmentGainsArguments(t *testing.T) {
+	obj := map[string]any{"choices": []any{map[string]any{
+		"index": 0,
+		"delta": map[string]any{"tool_calls": []any{map[string]any{
+			"index": float64(0), "id": "c1", "type": "function",
+			"function": map[string]any{"name": "f"},
+		}}},
+	}}}
+	seen := map[int]bool{}
+	stripToolCallNames(obj, seen)
+	fn := obj["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)
+	if fn["arguments"] != "" {
+		t.Fatalf("first fragment arguments = %#v, want \"\" (补发首段参数增量)", fn["arguments"])
+	}
+	// 首片已有非空 arguments 时不动。
+	obj2 := map[string]any{"choices": []any{map[string]any{
+		"index": 0,
+		"delta": map[string]any{"tool_calls": []any{map[string]any{
+			"index": float64(3), "function": map[string]any{"name": "g", "arguments": "{\"x\":1}"},
+		}}},
+	}}}
+	stripToolCallNames(obj2, map[int]bool{})
+	fn2 := obj2["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)
+	if fn2["arguments"] != "{\"x\":1}" {
+		t.Fatalf("existing arguments disturbed: %#v", fn2["arguments"])
+	}
+}
+
+func TestAggregateReasoningOnlyFails(t *testing.T) {
+	raw := "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"thinking...\"}}]}\n\n" +
+		"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	_, err := Aggregate(strings.NewReader(raw))
+	if !IsReasoningOnlyError(err) {
+		t.Fatalf("reasoning-only aggregate err = %v, want errReasoningOnly", err)
+	}
+	// 带正文的流不受影响。
+	ok := "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"t\"}}]}\n\n" +
+		"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer\"}}]}\n\n" +
+		"data: [DONE]\n\n"
+	resp, err := Aggregate(strings.NewReader(ok))
+	if err != nil || resp == nil {
+		t.Fatalf("content stream failed: %v", err)
 	}
 }

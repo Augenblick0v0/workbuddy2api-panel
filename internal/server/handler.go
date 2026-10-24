@@ -2,6 +2,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -1066,6 +1067,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 此前在读第一帧之前就 NoteSuccess + 清 11102 负缓存 + 绑粘性 → 被限流的号
 		// 记成健康、粘性把会话钉死在它身上，后续每一轮都打同一个限流号。
 		if peek.Stream {
+			// 首帧窥探（Hub #522）：向客户端写出任何字节之前先读到上游首个完整
+			// data: 事件。上游 200 后未发任何事件即断（首字节前断流）→ 此时尚未
+			// 写任何响应字节，可安全换号重开一次，而不是给客户端一条必然的空流
+			// 错误帧。窥探到的字节经 PrefixedReadCloser 与剩余流拼回，零丢失。
+			prefix, frames, perr := upstream.PeekFirstFrame(rc)
+			if perr != nil && frames == 0 {
+				recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
+				st.status = http.StatusServiceUnavailable
+				lastErr = fmt.Errorf("upstream stream broke before first frame: %w", perr)
+				log.Printf("WARN: [server] stream acct=%s: broke before first byte, reopening on another account: %v",
+					logfmt.Label(acct.UID, acct.Nickname), perr)
+				h.cfg.Pool.NoteFailures(acct.UID)
+				fail(acct.UID)
+				if !rotateBackoff(i, r.Context()) {
+					break // ctx 取消：终止轮转（首字节前断流重开）
+				}
+				continue
+			}
+			rc = &upstream.PrefixedReadCloser{Prefix: bytes.NewReader(prefix), Rest: rc}
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
 			st.status = http.StatusOK
 			stats := newChatStatsReaderSince(rc, st.start)
@@ -1153,6 +1173,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		rc.Close()
 		if err != nil {
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
+			// 空流 / reasoning-only（上游 200 但没有可用正文，Hub #522/#508）：
+			// 客户端尚未看到任何输出，按可轮转错误换号重开，而非直接 502——
+			// 换个号往往能拿到正常回复；其余解析错误仍 502 原因透传。
+			if upstream.IsEmptyStreamError(err) || upstream.IsReasoningOnlyError(err) {
+				st.status = http.StatusServiceUnavailable
+				lastErr = err
+				log.Printf("WARN: [server] non-stream acct=%s: %v (rotating)", logfmt.Label(acct.UID, acct.Nickname), err)
+				h.cfg.Pool.NoteFailures(acct.UID)
+				fail(acct.UID)
+				if !rotateBackoff(i, r.Context()) {
+					break // ctx 取消：终止轮转（空流/reasoning-only 换号）
+				}
+				continue
+			}
 			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			st.status = http.StatusBadGateway

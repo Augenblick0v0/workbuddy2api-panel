@@ -3,6 +3,9 @@ package upstream
 
 import (
 	"bufio"
+	"bytes"
+	crand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,10 +22,18 @@ import (
 // 客户端已走，日志口径不同。Aggregate 与 StreamHint 共用同一哨兵（errors.Is 判定）。
 var errEmptyStream = errors.New("upstream stream contained no valid data events")
 
+// errReasoningOnly 上游 200、流里有 reasoning 增量但始终没有任何正文/工具调用
+//（模型只产出了思考就被上游收尾，Hub #508）：对客户端是不可用回复，按失败
+// 处理让调用方换号重开，不合成空 content 的假成功。
+var errReasoningOnly = errors.New("upstream stream carried only reasoning and no content or tool calls")
+
 // IsEmptyStreamError 报告错误是否为「上游空流」（无有效 SSE 帧）——供 handler
 // 在流式路径把空流记为失败观测（HTTP 头已发出只能 200，但日志/状态应收敛到
 // upstream_parse 同语义），与客户端断连类错误区分。
 func IsEmptyStreamError(err error) bool { return errors.Is(err, errEmptyStream) }
+
+// IsReasoningOnlyError 判定 Aggregate 的「只有 reasoning、无正文无工具调用」错误。
+func IsReasoningOnlyError(err error) bool { return errors.Is(err, errReasoningOnly) }
 
 // Aggregate 读取完整 SSE 流，聚合 delta.content 为单个 OpenAI chat.completion 响应。
 // 分片/半行由 bufio.Reader.ReadString 处理；遇到 "data: [DONE]" 结束。
@@ -212,6 +223,11 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		// 不再合成空 content 的假成功响应，直接报错，由 handler 映射为 502 upstream_parse。
 		return nil, errEmptyStream
 	}
+	// 只有 reasoning、无正文无工具调用（Hub #508）：模型只输出了思考就被收尾，
+	// 空 content 的「成功」对客户端不可用——报错让 handler 换号重开。
+	if !gotAnyContent && reasoning.Len() > 0 && len(toolOrder) == 0 {
+		return nil, errReasoningOnly
+	}
 	if id == "" {
 		id = fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
 	}
@@ -379,6 +395,13 @@ func stripToolCallNames(obj map[string]any, seen map[int]bool) {
 			}
 			// 首现：保留 name 键原样（上游首片通常带非空 name；空 name 也照发，
 			// 与 OpenAI 对「首帧无 name」的容忍一致），随后分片统一删除。
+			// 首段参数增量补齐（Hub：arguments 键从首片起就存在——部分客户端
+			// 在首片缺 arguments 时不会拼接后续增量）：缺失置空串，有值不动。
+			if fn, _ := tc["function"].(map[string]any); fn != nil {
+				if _, has := fn["arguments"]; !has {
+					fn["arguments"] = ""
+				}
+			}
 			seen[idx] = true
 		}
 	}
@@ -388,7 +411,7 @@ func stripToolCallNames(obj map[string]any, seen map[int]bool) {
 // 剔除上游噪声（finish_reason:"" → null、空 content/refusal、空 tool_calls 列表、
 // 空占位 function_call、顶层未知字段），空 delta 键一律省略，
 // usage 缺失 → null，保证任意标准客户端按规范解析。
-func normalizeFrame(obj map[string]any) map[string]any {
+func normalizeFrame(obj map[string]any, fallbackID string) map[string]any {
 	out := map[string]any{}
 	for _, k := range []string{"id", "object", "created", "model", "system_fingerprint", "service_tier"} {
 		if v, ok := obj[k]; ok && v != nil {
@@ -399,7 +422,9 @@ func normalizeFrame(obj map[string]any) map[string]any {
 		out["object"] = "chat.completion.chunk"
 	}
 	if _, ok := out["id"]; !ok {
-		out["id"] = "chatcmpl-wb2api"
+		// fallbackID 是 StreamHint 的**每流唯一**哨兵（Hub：动态唯一 chunk id）——
+		// 此前静态哨兵跨流重名，按 id 归并的后端会把不同请求的帧混在一起。
+		out["id"] = fallbackID
 	}
 	if chs, ok := obj["choices"].([]any); ok {
 		nchs := make([]any, 0, len(chs))
@@ -453,6 +478,10 @@ func normalizeFrame(obj map[string]any) map[string]any {
 			nchs = append(nchs, nc)
 		}
 		out["choices"] = nchs
+	} else {
+		// OpenAI 流式规范：每个 chunk 都带 choices 数组——usage 尾帧（include_usage
+		// 的末帧）的形态就是 choices:[] + usage（Hub：usage 尾帧空 choices）。
+		out["choices"] = []any{}
 	}
 	if rawUsage, ok := obj["usage"]; ok {
 		if u, ok := rawUsage.(map[string]any); ok {
@@ -520,6 +549,10 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	// 一律补 chatcmpl-wb2api 哨兵，造成同流 id 分裂）。全流无真实 id → 才出现哨兵。
 	firstID := ""
 
+	// sentinelID 每流唯一的兜底 id（Hub：synthesized 帧用动态唯一 chunk id）：
+	// 静态哨兵跨流重名，按 id 归并的观测会把不同请求的帧混在一起。
+	sentinelID := "chatcmpl-wb2api-" + randHexSuffix()
+
 	// writeRaw 原样写出一帧（绕过 normalizeFrame）并 flush。上游 error 帧（error-passthrough）
 	// 与空流错误帧需保留 error 字段，不能被白名单剥掉，故经此写出。
 	// gateway_hint：上游 error 帧透出前按 hintFn 附加 error.gateway_hint 字段
@@ -571,7 +604,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 					obj["id"] = firstID
 				}
 			}
-			if raw, err := json.Marshal(normalizeFrame(obj)); err == nil {
+			if raw, err := json.Marshal(normalizeFrame(obj, sentinelID)); err == nil {
 				payload = string(raw)
 			}
 			valid = 1
@@ -668,3 +701,90 @@ func attachHintToErrorFrame(payload, hint string) string {
 	}
 	return string(out)
 }
+
+// randHexSuffix 8 位随机 hex（哨兵 id 后缀）。
+func randHexSuffix() string {
+	var b [4]byte
+	if _, err := crand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// PeekFirstFrame 从 SSE 流预读至首个完整 data: 事件（在向客户端写出任何字节
+// 之前判定「上游 200 后是否真的开流」，Hub #522：首字节前断流重开一次）。
+// 返回 prefix（已预读的全部字节，调用方须与剩余流拼接送出）、frames（已见的
+// 完整事件数；读到 1 即返回）。
+// 错误语义：frames==0 的读错误 = 「首字节前断流」，此时调用方尚未写任何响应
+// 字节，可安全换号重开。
+func PeekFirstFrame(r io.Reader) (prefix []byte, frames int, err error) {
+	buf := make([]byte, 8*1024)
+	var acc []byte
+	for {
+		n, rerr := r.Read(buf)
+		if n > 0 {
+			acc = append(acc, buf[:n]...)
+			if hasCompleteSSEEvent(acc) {
+				return acc, 1, nil
+			}
+			if len(acc) > 1<<20 { // 防御：无事件边界的超长前缀不无限累积
+				return acc, 0, errors.New("sse peek: no complete event within 1MiB")
+			}
+		}
+		if rerr != nil {
+			return acc, 0, rerr
+		}
+	}
+}
+
+// hasCompleteSSEEvent 判定缓冲里是否已有至少一个完整 SSE 事件（data: 行之后
+// 出现空行边界）。
+func hasCompleteSSEEvent(b []byte) bool {
+	i := 0
+	for {
+		j := indexBlankLine(b[i:])
+		if j < 0 {
+			return false
+		}
+		if hasDataLine(b[i : i+j]) {
+			return true
+		}
+		i += j
+	}
+}
+
+// indexBlankLine 找到首个事件边界（\n\n 或 \r\n\r\n）的结尾位置。
+func indexBlankLine(b []byte) int {
+	if k := bytes.Index(b, []byte("\n\n")); k >= 0 {
+		return k + 2
+	}
+	if k := bytes.Index(b, []byte("\r\n\r\n")); k >= 0 {
+		return k + 4
+	}
+	return -1
+}
+
+func hasDataLine(b []byte) bool {
+	for _, line := range bytes.Split(b, []byte("\n")) {
+		if bytes.HasPrefix(bytes.TrimRight(line, "\r"), []byte("data:")) {
+			return true
+		}
+	}
+	return false
+}
+
+// PrefixedReadCloser 把预读的前缀字节与剩余流拼回一个 ReadCloser（PeekFirstFrame
+// 配套：预读字节不丢、底层 Close 语义保持）。
+type PrefixedReadCloser struct {
+	Prefix *bytes.Reader
+	Rest   io.ReadCloser
+}
+
+func (p *PrefixedReadCloser) Read(b []byte) (int, error) {
+	if p.Prefix.Len() > 0 {
+		return p.Prefix.Read(b)
+	}
+	return p.Rest.Read(b)
+}
+
+func (p *PrefixedReadCloser) Close() error { return p.Rest.Close() }
