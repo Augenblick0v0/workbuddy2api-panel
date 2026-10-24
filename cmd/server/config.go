@@ -98,6 +98,13 @@ type Config struct {
 		TravelEnabled    bool `json:"travel_enabled"`    // 缺省 true；false = 完全停猫猫旅行
 		ActivityEnabled  bool `json:"activity_enabled"`  // 缺省 true；false = 停活跃上报
 		KeepaliveEnabled bool `json:"keepalive_enabled"` // 缺省 true；false = 关 token 保活
+		// QuotaScanEnabled 模型额度窗口复验扫描（Hub quota-scan 的窗口探针子集）：
+		// 周期检查各账号「已限流模型」的窗口到期时刻，到点前发一次 1-token 探针
+		// 复验——已重开则立即解除模型冷却（抢占新窗口），仍限流则按新重置时间续窗。
+		// 探针消耗真实配额（每条线每周期 1 次），缺省 false（显式开启）。
+		QuotaScanEnabled bool `json:"quota_scan_enabled"`
+		// QuotaScanMinutes 扫描周期分钟数；<=0 回落 15。
+		QuotaScanMinutes int `json:"quota_scan_minutes"`
 		BlackcatEnabled  bool `json:"blackcat_enabled"`  // 缺省 true；false = 关夜猫子
 		GrowthEnabled    bool `json:"growth_enabled"`    // 缺省 true；false = 关成长任务自动排程
 
@@ -167,6 +174,14 @@ type Config struct {
 		// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
 		// 空 = 旧行为 X-Product="SaaS" 不设 X-IDE-*；配 "WorkBuddy" 则四头跟随。
 		ClientName string `json:"client_name"`
+		// ChatBaseCN / BillingBaseCN 国内版上游 base 覆盖（Hub WB_CN_CHAT_UPSTREAM
+		// 对应物）：上游换地址时改配置即可，空 = 内置默认 copilot.tencent.com。
+		ChatBaseCN    string `json:"chat_base_cn"`
+		BillingBaseCN string `json:"billing_base_cn"`
+		// ModelsAllowlist 模型白名单（/v1/models 过滤 + chat 拒绝名单外模型）。
+		// 条目按裸模型名前缀匹配（"glm-5.2" 覆盖 glm-5.2 / glm-5.2-flash）；
+		// 空 = 不过滤。
+		ModelsAllowlist []string `json:"models_allowlist"`
 		// DeviceToken 设备风控 Token（X-Device-Token 头）全局兜底；空 = 不注入。
 		// 每号 auth 文件的 device_token 键优先于本项。
 		DeviceToken string `json:"device_token"`
@@ -293,6 +308,7 @@ func Default() *Config {
 	c.Schedule.KeepaliveEnabled = true
 	c.Schedule.BlackcatEnabled = true
 	c.Schedule.BalanceRefreshEnabled = true
+	c.Schedule.QuotaScanMinutes = 15
 	c.Schedule.BalanceRefreshMinutes = 5
 	c.Upstream.TimeoutSeconds = 120
 	c.Upstream.AccountDeviceTokenOnly = true

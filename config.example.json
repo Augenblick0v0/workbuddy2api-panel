@@ -40,6 +40,8 @@
     "keepalive_enabled": true,
     "blackcat_enabled": true,
     "balance_refresh_enabled": true,
+    "quota_scan_enabled": false,
+    "quota_scan_minutes": 15,
     "balance_refresh_minutes": 5,
     "include_disabled_in_tasks": false
   },
@@ -53,6 +55,9 @@
     "header_timeout_seconds": 120,
     "idle_timeout_seconds": 300,
     "user_agent": "",
+    "chat_base_cn": "",
+    "billing_base_cn": "",
+    "models_allowlist": [],
     "outbound_identity": "",
     "outbound_identities": [],
     "outbound_cli_version": "",

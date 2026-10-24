@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -77,7 +78,12 @@ type Scheduler struct {
 	// 分别用独立 channel（同 channel 被两个 select 消费会丢信号）。
 	schedMu       sync.Mutex
 	rearmSchedule chan struct{}
-	rearmBalance  chan struct{}
+
+	// balanceRound/balanceInFlight 余额刷新的单飞护栏（Hub：CAS 单飞）：
+	// 轮级 CAS 防定时+手动触发重叠；uid 级 CAS 防同一账号并发重复刷新。
+	balanceRound    atomic.Bool
+	balanceInFlight sync.Map
+	rearmBalance    chan struct{}
 
 	// balanceInterval 余额刷新间隔（纳秒，0=暂停）。atomic 读写：执行循环每轮读当前值，
 	// SetBalanceInterval 可任意时刻热改（面板保存配置）。
@@ -611,7 +617,13 @@ func (s *Scheduler) RunKeepaliveNow() {
 // 解冻语义与签到一致（ReenableIfCredits：余额 > 0 的冷却账号自动解冻），
 // 但不做签到、不刷新 token——只让"积分"这个观测量保持新鲜。
 // 供两类入口复用：后台周期任务（StartBalanceRefresh）与面板手动全量刷新。
+// balanceRound CAS 单飞：上一轮刷新还没跑完时跳过本轮（定时触发与面板手动触发
+// 并发重叠不再对同一账号发两次余额请求，Hub「全池刷积分加 CAS 单飞」）。
 func (s *Scheduler) RunBalanceRefreshNow() {
+	if !s.balanceRound.CompareAndSwap(false, true) {
+		return
+	}
+	defer s.balanceRound.Store(false)
 	var wg sync.WaitGroup
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
@@ -623,9 +635,14 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 		if a == nil {
 			continue
 		}
+		// per-uid CAS 单飞：并发触发（面板手动 + 定时）下同一账号只允许一条在途刷新。
+		if _, inflight := s.balanceInFlight.LoadOrStore(st.UID, struct{}{}); inflight {
+			continue
+		}
 		wg.Add(1)
 		go func(a *auth.Auth, uid string) {
 			defer wg.Done()
+			defer s.balanceInFlight.Delete(uid)
 			remain, total, expiring, earliestAt, earliestRemaining, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, expiringSoon)
 			if err != nil {
 				log.Printf("balance %s: %v", logfmt.Label(uid, a.Nickname), err)
@@ -634,6 +651,10 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 			s.cfg.Pool.ReenableIfCredits(uid, remain, total)
 			s.cfg.Pool.SetCreditsDetailed(uid, remain, total, expiring, earliestAt, earliestRemaining)
 		}(a, st.UID)
+		// 拟人间隔：账号间错峰启动（Hub「账号间拟人间隔护栏」）——全池同时打余额
+		// 接口是一次性流量尖峰，上游侧观感是脚本化行为。200ms~600ms 随机错峰，
+		// 20 号满池一轮拉开 ~7s，远小于刷新间隔，无感。
+		time.Sleep(200*time.Millisecond + time.Duration(rand.Intn(400))*time.Millisecond)
 	}
 	wg.Wait()
 }

@@ -38,6 +38,10 @@ type Config struct {
 	Upstream  *upstream.Client
 	APIKey    string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
 	MaxRotate int    // 单请求最多换号次数，默认 3
+	// ModelsAllowlist 模型白名单（config upstream.models_allowlist）：非空时
+	// /v1/models 只列名单内模型，chat 请求名单外模型直接 403（单 key 部署的
+	// 「按 key 限制可用模型」语义，Hub 多 key 特性的单 key 子集）。
+	ModelsAllowlist []string
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -145,6 +149,9 @@ func NewHandler(cfg Config) *Handler {
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
+	// /u/{ref}/v1/... 按账号定址路由（Hub #455）：调试/运维把请求钉在指定账号上，
+	// 不走池轮换。ref = 账号 uid（或唯一前缀/唯一昵称）。
+	h.mux.HandleFunc("POST /u/{ref}/v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	if cfg.Panel != nil {
@@ -285,10 +292,34 @@ const (
 // models 返回模型列表：纯动态（缓存 10min），失败/无号返回空列表（无静态兜底——
 // 拉不出目录即意味着上游不可用，假名单只会让客户端选到 11102 的模型）。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
+	list := h.modelList()
+	// 模型白名单：非空时只列名单内模型（与 chat 侧 403 同一闸口）。
+	if len(h.cfg.ModelsAllowlist) > 0 {
+		filtered := make([]map[string]any, 0, len(list))
+		for _, m := range list {
+			id, _ := m["id"].(string)
+			if h.modelAllowed(bareModelName(id)) {
+				filtered = append(filtered, m)
+			}
+		}
+		list = filtered
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data":   h.modelList(),
+		"data":   list,
 	})
+}
+
+// bareModelName 剥掉 /v1/models 条目 id 上的 realm 前缀（cn:/global:），白名单
+// 匹配按裸名进行。
+func bareModelName(id string) string {
+	if v, ok := strings.CutPrefix(id, "cn:"); ok {
+		return v
+	}
+	if v, ok := strings.CutPrefix(id, "global:"); ok {
+		return v
+	}
+	return id
 }
 
 // fmtCreditsPrefix 从上游 credits 原文提取倍率并格式化为 "[x0.05 credit]"。
@@ -537,6 +568,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
 	realm, bareModel := resolveModel(peek.Model)
+	// 模型白名单（upstream.models_allowlist）：非空时名单外模型直接 403——
+	// 共享单 key 部署限制调用方可用模型的唯一闸口（/v1/models 同步过滤）。
+	if !h.modelAllowed(bareModel) {
+		writeOpenAIError(w, http.StatusForbidden, "model_not_allowed", "model "+bareModel+" is not in the configured allowlist")
+		return
+	}
+	// /u/{ref}/ 按账号定址（Hub #455）：ref 解析为 uid（精确 > 唯一前缀 > 唯一昵称），
+	// 命中后本次请求钉在该账号上（不走粘性/轮换；不可用即 503 说明原因）。
+	pinnedUID := ""
+	if ref := r.PathValue("ref"); ref != "" {
+		pinnedUID = h.resolveAccountRef(ref)
+		if pinnedUID == "" {
+			writeOpenAIError(w, http.StatusNotFound, "account_ref_not_found", "no account matches ref "+ref)
+			return
+		}
+	}
 	modelRate := ""
 	if h.cfg.Upstream != nil {
 		modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
@@ -753,9 +800,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
 	for i := 0; i < h.cfg.MaxRotate; i++ {
-		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
+		// 选号：/u/{ref} 定址 > 粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满）> 普通轮换。
 		var acct *auth.Auth
-		if stickyUID != "" {
+		if pinnedUID != "" {
+			// 定址模式：只钉该号；不可用（冷却/禁用/该模型限流/在途满）立即说明，不换号。
+			acct = h.cfg.Pool.PickByUIDForModel(pinnedUID, bareModel)
+			if acct == nil {
+				st.status = http.StatusServiceUnavailable
+				lastErr = fmt.Errorf("pinned account %s unavailable (cooling/disabled/model-limited/busy)", pinnedUID)
+				log.Printf("WARN: [server] pinned account %s unavailable for model %s", pinnedUID, bareModel)
+				break
+			}
+		} else if stickyUID != "" {
 			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, bareModel)
 			if acct == nil || (realm != "" && acct.Realm() != realm) {
 				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）或 realm 不符 → 解绑，
@@ -1663,6 +1719,50 @@ func (h *Handler) hintContext(bareModel string, hasImage bool) upstream.HintCont
 // gateway_hint 文案（upstream.GatewayHint 单一事实来源）。uerr 为 nil 时回落
 // body 原文判定（防御路径）。transport 层错误（lastErr 非 *upstream.Error 且
 // 上游没回 body）→ 无 hint（不编造）。
+// modelAllowed 模型白名单判定：空名单恒真；条目按裸模型名匹配（相等，或作为
+// “-”/“:” 边界前缀——"glm-5.2" 覆盖 glm-5.2、glm-5.2-flash，不误盖 glm-5.20）。
+func (h *Handler) modelAllowed(bareModel string) bool {
+	if len(h.cfg.ModelsAllowlist) == 0 {
+		return true
+	}
+	for _, e := range h.cfg.ModelsAllowlist {
+		if bareModel == e || strings.HasPrefix(bareModel, e+"-") || strings.HasPrefix(bareModel, e+":") {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveAccountRef 把 /u/{ref}/ 的 ref 解析为 uid：精确 uid > uid 唯一前缀 >
+// 唯一昵称。无匹配或多义（前缀/昵称撞多个号）返回空串（调用方 404）。
+func (h *Handler) resolveAccountRef(ref string) string {
+	if h.cfg.Pool == nil || ref == "" {
+		return ""
+	}
+	if a := h.cfg.Pool.AuthByUID(ref); a != nil {
+		return a.UID
+	}
+	var prefixHit, nickHit string
+	for _, st := range h.cfg.Pool.List() {
+		if strings.HasPrefix(st.UID, ref) {
+			if prefixHit != "" {
+				return "" // 前缀多义
+			}
+			prefixHit = st.UID
+		}
+		if st.Nickname == ref {
+			if nickHit != "" {
+				return "" // 昵称多义
+			}
+			nickHit = st.UID
+		}
+	}
+	if prefixHit != "" {
+		return prefixHit
+	}
+	return nickHit
+}
+
 func (h *Handler) hintOf(kind upstream.ErrKind, body, bareModel string, hasImage bool, uerr *upstream.Error) string {
 	msg := body
 	if uerr != nil && uerr.Msg != "" {

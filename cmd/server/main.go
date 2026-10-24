@@ -171,6 +171,13 @@ func main() {
 	// auth 侧开关（auth.SetGlobalEnabled）是第二道闸，两者同 config global.enabled。
 	up.GlobalEnabled = cfg.Global.Enabled
 	up.ChatBaseGlobal = cfg.Global.ChatBase
+	// 国内版上游改址（Hub WB_CN_CHAT_UPSTREAM 对应）：空 = 内置默认 copilot.tencent.com。
+	if cfg.Upstream.ChatBaseCN != "" {
+		up.ChatBaseCN = cfg.Upstream.ChatBaseCN
+	}
+	if cfg.Upstream.BillingBaseCN != "" {
+		up.BillingBaseCN = cfg.Upstream.BillingBaseCN
+	}
 	up.BillingBaseGlobal = cfg.Global.BillingBase
 	auth.SetGlobalEnabled(cfg.Global.Enabled)
 	// model.json 本地缓存接线（context_length/max_output_tokens 四级查找链第 3 级）：
@@ -321,19 +328,20 @@ func main() {
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
 	h := server.NewHandler(server.Config{
-		Pool:         p,
-		Upstream:     up,
-		APIKey:       cfg.APIKey,
-		Session:      sessRouter,
-		StickyCount:  sessCount,
-		RedisMode:    redisMode,
-		SoftCooldown: cfg.SoftRateDur,
-		Panel:        pn,
-		Live:         live,
-		Usage:        rec,
-		RequestLog:   requestLog,
-		PromptMode:   cfg.Prompt.Mode,
-		PromptText:   cfg.PromptText,
+		Pool:            p,
+		Upstream:        up,
+		ModelsAllowlist: cfg.Upstream.ModelsAllowlist,
+		APIKey:          cfg.APIKey,
+		Session:         sessRouter,
+		StickyCount:     sessCount,
+		RedisMode:       redisMode,
+		SoftCooldown:    cfg.SoftRateDur,
+		Panel:           pn,
+		Live:            live,
+		Usage:           rec,
+		RequestLog:      requestLog,
+		PromptMode:      cfg.Prompt.Mode,
+		PromptText:      cfg.PromptText,
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
@@ -345,6 +353,13 @@ func main() {
 	defer stop()
 	go sch.Run(ctx)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
+	if cfg.Schedule.QuotaScanEnabled {
+		mins := cfg.Schedule.QuotaScanMinutes
+		if mins <= 0 {
+			mins = 15
+		}
+		sch.StartQuotaWindowScan(ctx, time.Duration(mins)*time.Minute)
+	}
 
 	// 启动即预热模型积分倍率表：倍率只在 FetchModels/FetchGlobalModelInfos 成功时
 	// 填充（两者均懒触发），重启后到首次 /v1/models 或面板模型页被访问之前，
