@@ -54,3 +54,4 @@ output/playwright/
 *.zip
 server.exe
 .DS_Store
+wb2api-*.exe
