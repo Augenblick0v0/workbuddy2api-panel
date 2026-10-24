@@ -80,12 +80,20 @@ func (m *Manager) probeReach(ctx context.Context, target string) (WBTargetResult
 	client := &http.Client{Transport: m, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	r, err := client.Do(req)
 	if err != nil {
-		code := "proxy_probe_failed"
+		// Keep the transport's own EgressError (its stage and proxy HTTP status
+		// are the diagnostics callers display); only a deadline becomes a
+		// probe-timeout so the two legs cannot eat the whole budget.
 		if ctx.Err() != nil {
-			code = "proxy_timeout"
+			res.ErrorCode = "proxy_timeout"
+			return res, &EgressError{Code: "proxy_timeout", Stage: "wb_reach", Reason: "deadline"}
 		}
-		res.ErrorCode = code
-		return res, &EgressError{Code: code, Stage: "wb_reach", Reason: "deadline"}
+		var ee *EgressError
+		if errors.As(err, &ee) {
+			res.ErrorCode = ee.Code
+			return res, ee
+		}
+		res.ErrorCode = "proxy_probe_failed"
+		return res, &EgressError{Code: "proxy_probe_failed", Stage: "wb_reach"}
 	}
 	defer r.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 4<<10))
@@ -251,6 +259,7 @@ func (m *Manager) probeWorkBuddy(ctx context.Context, id string, h *RouteHandle,
 			result.ErrorCode = ee.Code
 			result.ErrorStage = ee.Stage
 			result.ErrorReason = ee.Reason
+			result.ProxyStatus = ee.ProxyStatus
 		}
 		if ctx.Err() != nil {
 			result.ErrorCode = "proxy_timeout"

@@ -11,7 +11,7 @@ import (
 )
 
 // cnDesktopReportUA CN 桌面端出站 UA 的期望值（身份矩阵默认，E3 实测形态）。
-const cnDesktopReportUA = "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"
+const cnDesktopReportUA = "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0"
 
 // TestReportDesktopEventFingerprint 断言桌面指纹上报：走 chatBase、UA 为桌面形状、
 // 事件数组自动注入 workbuddy-desktop 公共指纹（覆盖同名业务键）。
@@ -43,7 +43,7 @@ func TestReportDesktopEventFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("report desktop: %v", err)
 	}
-	// CN 桌面端 UA 取身份矩阵默认值（E3 实测 5.5.6 / CLI 2.137.1）。
+	// CN 桌面端 UA 取身份矩阵默认值（E4 实测 5.8.3 / CLI 2.161.0）。
 	if gotUA != cnDesktopReportUA {
 		t.Errorf("UA=%q want %q", gotUA, cnDesktopReportUA)
 	}

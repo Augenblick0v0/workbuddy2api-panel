@@ -36,7 +36,7 @@ func chatHeaderSet(t *testing.T, c *Client, a *auth.Auth) http.Header {
 }
 
 // TestIdentityMatrixUserAgentTable 身份矩阵 UA 取值表（规格 §2 取值表 + §6 用例 1）。
-// 证据：E1（global 5.8.4 抓包）/ E3（CN 保持 5.5.6 实测，零漂移）。
+// 证据：E1（global 5.8.4 抓包）/ E4（CN 5.8.3 / CLI 2.161.0 两区实跑抓包）。
 func TestIdentityMatrixUserAgentTable(t *testing.T) {
 	c := New()
 	for _, tc := range []struct {
@@ -44,7 +44,7 @@ func TestIdentityMatrixUserAgentTable(t *testing.T) {
 		a    *auth.Auth
 		want string
 	}{
-		{"cn", cnTestAuth(), "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"},
+		{"cn", cnTestAuth(), "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0"},
 		{"global", globalTestAuth(), "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -74,8 +74,8 @@ func TestIdentityMatrixCNZeroDrift(t *testing.T) {
 		"X-Agent-Purpose":     "conversation",
 		"X-IDE-Name":          "WorkBuddy",
 		"X-IDE-Type":          "WorkBuddy",
-		"X-IDE-Version":       "5.5.6",
-		"User-Agent":          "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1",
+		"X-IDE-Version":       "5.8.3",
+		"User-Agent":          "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0",
 		"Accept-Language":     "zh-CN",
 		"Origin":              "https://www.codebuddy.cn",
 		"Referer":             "https://www.codebuddy.cn/",
@@ -126,7 +126,7 @@ func TestIdentityMatrixOverridePrecedence(t *testing.T) {
 	// 1) ClientVersion 覆盖：CN 5.5.6 → 6.0.0（UA 两段 + X-IDE-Version 同步）。
 	c := &Client{ClientVersion: "6.0.0"}
 	h := chatHeaderSet(t, c, cnTestAuth())
-	if got := h.Get("User-Agent"); got != "WorkBuddy/6.0.0 WorkBuddy/6.0.0 CLI/2.137.1" {
+	if got := h.Get("User-Agent"); got != "WorkBuddy/6.0.0 WorkBuddy/6.0.0 CLI/2.161.0" {
 		t.Errorf("client_version UA = %q", got)
 	}
 	if got := h.Get("X-IDE-Version"); got != "6.0.0" {
@@ -200,7 +200,7 @@ func captureDesktopReport(t *testing.T, a *auth.Auth) (string, map[string]any) {
 }
 
 // TestIdentityMatrixDesktopReportVersion 桌面上报体的版本字段按 realm 走矩阵
-// （规格 §6 用例 6）：CN 5.5.6 / global 5.8.4，且 body 形状不变。
+// （规格 §6 用例 6）：CN 5.8.3 / global 5.8.4，且 body 形状不变。
 func TestIdentityMatrixDesktopReportVersion(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -208,7 +208,7 @@ func TestIdentityMatrixDesktopReportVersion(t *testing.T) {
 		version string
 		ua      string
 	}{
-		{"cn", cnTestAuth(), "5.5.6", "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"},
+		{"cn", cnTestAuth(), "5.8.3", "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0"},
 		{"global", globalTestAuth(), "5.8.4", "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

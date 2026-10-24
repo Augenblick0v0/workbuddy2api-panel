@@ -24,7 +24,7 @@ import (
 func serverProxyFixture(t *testing.T, proxies ...string) (*upstream.Client, *egress.Manager) {
 	t.Helper()
 	c := upstream.New()
-	m, err := egress.Open(filepath.Join(t.TempDir(), "proxies.json"), egress.Options{BaseTransport: c.HTTP.Transport.(*http.Transport), AllowedCIDRs: []string{"127.0.0.0/8"}, ProbeURL: "http://probe.invalid/ip"})
+	m, err := egress.Open(filepath.Join(t.TempDir(), "proxies.json"), egress.Options{BaseTransport: c.HTTP.Transport.(*http.Transport), AllowedCIDRs: []string{"127.0.0.0/8"}, ProbeURL: "http://probe.invalid/ip", ProbeMode: "legacy"})
 	if err != nil {
 		t.Fatal(err)
 	}

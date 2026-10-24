@@ -22,9 +22,13 @@ import "github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 //	    `WorkBuddy AI` 均返回 HTTP 200 code=0 —— 旧注释里「送错平台段会 403 code 11140」
 //	    的结论已被证伪；且 5.5.4→5.5.6 / 5.8.4 的版本与 UA 变更**不改变模型目录**
 //	    （CN 60 个、global 27 个、差异集为空）→ 升级 UA 品牌段与版本无功能风险。
-//	E3  CN 侧本次无新抓包：保持 2026-09 实测值（客户端 5.5.6 / CLI 2.137.1 / 品牌段
-//	    `WorkBuddy` / 头族完全不变）零漂移；对 CN 的唯一改动是把内置默认客户端版本
-//	    从 5.5.4 对齐到实测的 5.5.6。
+//	E3  CN 侧 2026-09 实测为 5.5.6 / CLI 2.137.1；E4 起对齐新实测（见下）。
+//	E4  2026-10-18 两区桌面端实跑抓包（Hub Go 版记录）：CN 桌面端 5.8.3、内置
+//	    CLI 2.161.0；UA 第二段品牌 CN 仍是 `WorkBuddy`（国际版才是 workbuddy-ai）。
+//	    故 CN 桌面端 5.5.6→5.8.3、CLI 2.137.1→2.161.0；global 维持 E1 的 5.8.4。
+//	E5  官方 CodeBuddy CLI 2.168.2（npm 包 @tencent-ai/codebuddy-code 解包核对）
+//	    与官方 VSCode 扩展 4.12.39997873（Open VSX `Tencent-Cloud.coding-copilot`
+//	    product.json）——CLI / VSCode 两套可选出站身份的头族依据（identity_select.go）。
 //
 // ─────────────────────────────────────────────────────────────────────────────
 const (
@@ -39,9 +43,9 @@ const (
 	originRefererGlobal = "https://www.workbuddy.ai"
 
 	// 客户端版本：CN 取 E3 实测值，global 取 E1 实测值。
-	desktopClientVersionCN     = "5.5.6"
+	desktopClientVersionCN     = "5.8.3" // E4：两区实跑抓包
 	desktopClientVersionGlobal = "5.8.4"
-	desktopCLIVersionCN        = "2.137.1"
+	desktopCLIVersionCN        = "2.161.0" // E4
 	desktopCLIVersionGlobal    = "2.161.0"
 	// 小程序端版本：ideVersion / extVersion / X-Client-Version 同值（2026-09 实测）。
 	mpClientVersion = "2.4.0"

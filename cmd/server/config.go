@@ -153,6 +153,17 @@ type Config struct {
 		ClientVersion string `json:"client_version"`
 		// CliVersion 出站 UA 中 CLI 段的版本。空 = 身份矩阵默认（CN/global 各自实测值）。
 		CliVersion string `json:"cli_version"`
+		// OutboundIdentity chat 出站身份：""/"desktop"（默认）| "cli" | "vscode" |
+		// "auto"（按账号在 outbound_identities 名单内稳定轮换）。CLI/VSCode 头族
+		// 依据官方包解包（internal/upstream/identity_select.go）；非 chat 路径恒 desktop。
+		OutboundIdentity string `json:"outbound_identity"`
+		// OutboundIdentityAllowedList auto 模式身份允许名单；缺省空 = 仅 desktop。
+		OutboundIdentityAllowedList []string `json:"outbound_identities"`
+		// CLIVersionOverride cli 身份 IDE 版本（默认 2.168.2）。
+		CLIVersionOverride string `json:"outbound_cli_version"`
+		// VSCodeIDEVersion / VSCodeProductVersion vscode 身份宿主 IDE / 扩展版本。
+		VSCodeIDEVersion     string `json:"outbound_vscode_ide_version"`
+		VSCodeProductVersion string `json:"outbound_vscode_product_version"`
 		// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
 		// 空 = 旧行为 X-Product="SaaS" 不设 X-IDE-*；配 "WorkBuddy" 则四头跟随。
 		ClientName string `json:"client_name"`

@@ -4,7 +4,9 @@ package upstream
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
@@ -141,6 +143,9 @@ type ChatMeta struct {
 	ConversationID        string // X-Conversation-ID：body 提取的入站值，空则不发（透传优先，不伪造）
 	ConversationRequestID string // X-Conversation-Request-ID / X-Root-Request-ID：聚合主键，必发
 	TraceID               string // X-Trace-ID：入站透传值，空则回落 conversationRequestID
+	// Model 本次请求的模型名（vscode 身份带 X-Model-ID + monitor_* 时间戳用；
+	// desktop/cli 身份不消费该字段）。空则 vscode 也不发 X-Model-ID。
+	Model string
 }
 
 // ChatHeaders 在 common 之上加 chat 专属的账号头。
@@ -197,6 +202,12 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	}
 	// 会话头族（对话/请求/消息/B3 链路），见 injectConversationHeaders。
 	c.injectConversationHeaders(req, meta)
+	// 出站身份覆写（cli/vscode；desktop 零值直接返回，见 identity_select.go）。
+	c.applyChatIdentity(req, a, meta)
+	// cli 身份请求体已 gzip（ChatStreamContext.cliChatBody），补声明头。
+	if id := c.outboundIdentityFor(a); id == OutboundIdentityCLI {
+		req.Header.Set("Content-Encoding", "gzip")
+	}
 }
 
 // injectGlobalChatHeaders global 账号（无企业 ID）的 chat 专属声明头，对齐 intl 项目
@@ -252,6 +263,72 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	req.Header.Set("X-B3-TraceId", b3Trace)
 	req.Header.Set("X-B3-SpanId", messageID[:16])
 	req.Header.Set("X-B3-Sampled", "1")
+}
+
+// applyChatIdentity 在 desktop 基线之上覆写所选身份的差异化头族（identity_select.go）。
+// desktop 零值 profile 直接返回（零回归）。覆写面：UA / X-IDE-* / X-Agent-* /
+// X-Private-Data /（CLI）X-Agent-Runtime + x-stainless-* /（VSCode）X-Product-Version /
+// X-Env-ID / X-Request-Trace-Id / X-Model-ID + monitor_* 时间戳 + 会话头族差异。
+func (c *Client) applyChatIdentity(req *http.Request, a *auth.Auth, meta ChatMeta) {
+	p := c.chatIdentityProfileFor(a)
+	if p.Identity == OutboundIdentityDesktop {
+		return
+	}
+	req.Header.Set("User-Agent", p.UserAgent)
+	req.Header.Set("X-IDE-Name", p.IDEName)
+	req.Header.Set("X-IDE-Type", p.IDEType)
+	req.Header.Set("X-IDE-Version", p.IDEVersion)
+	if p.AgentIntent != "" {
+		req.Header.Set("X-Agent-Intent", p.AgentIntent)
+	}
+	if p.AgentType != "" {
+		req.Header.Set("X-Agent-Type", p.AgentType)
+	}
+	switch p.Identity {
+	case OutboundIdentityCLI:
+		req.Header.Set("X-Agent-Purpose", agentPurposeConversation)
+		req.Header.Set("X-Agent-Runtime", p.AgentRuntime)
+		req.Header.Set("X-Private-Data", boolHeader(p.PrivateDataCLI))
+		// x-stainless-* 按官方 wire 小写（Go Header.Set 会驼峰化，直接下 map）。
+		h := req.Header
+		h["x-stainless-lang"] = []string{"js"}
+		h["x-stainless-package-version"] = []string{cliStainlessSDKVersion}
+		h["x-stainless-os"] = []string{p.StainlessOS}
+		h["x-stainless-arch"] = []string{p.StainlessArch}
+		h["x-stainless-runtime"] = []string{cliStainlessRuntime}
+		h["x-stainless-runtime-version"] = []string{p.StainlessNode}
+		h["x-stainless-retry-count"] = []string{"0"}
+		h["x-stainless-timeout"] = []string{cliStainlessTimeout}
+	case OutboundIdentityVSCode:
+		req.Header.Set("X-Product-Version", p.ProductVersion)
+		req.Header.Set("X-Env-ID", p.EnvID)
+		req.Header.Set("X-Request-Trace-Id", p.RequestTraceID)
+		if p.PrivateDataVSCodeOmit {
+			req.Header.Del("X-Private-Data")
+		} else if p.PrivateDataVSCode {
+			req.Header.Set("X-Private-Data", "true")
+		}
+		if p.ModelHeaders && meta.Model != "" {
+			now := strconv.FormatInt(time.Now().UnixMilli(), 10)
+			req.Header.Set("X-Model-ID", meta.Model)
+			req.Header.Set("monitor_promptPrepareStartTime", now)
+			req.Header.Set("monitor_httpSendTime", now)
+		}
+		// VSCode 官方形态：X-Request-ID = 本轮 X-Conversation-Request-ID（同一
+		// requestId），主对话（primary agent）不发 X-Root-Request-ID。
+		if v := req.Header.Get("X-Conversation-Request-ID"); v != "" {
+			req.Header.Set("X-Request-ID", v)
+		}
+		req.Header.Del("X-Root-Request-ID")
+	}
+}
+
+// boolHeader HTTP 头布尔取值（"true"/"false"）。
+func boolHeader(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
 }
 
 // validTraceID 判断 B3 TraceId 是否合法：16 或 32 位 hex（大小写均可）。

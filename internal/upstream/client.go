@@ -4,6 +4,7 @@ package upstream
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -658,6 +659,19 @@ type Client struct {
 	// 证据 E1/E3）。
 	CliVersion string
 
+	// OutboundIdentity chat 出站身份（identity_select.go）：""/"desktop" 默认零回归
+	// | "cli" | "vscode" | "auto"（uid 稳定哈希轮换 OutboundIdentityAllowedList）。
+	// billing/refresh/models/任务上报恒 desktop。
+	OutboundIdentity string
+	// OutboundIdentityAllowedList auto 模式允许名单（缺省空 = 仅 desktop）。
+	OutboundIdentityAllowedList []string
+	// CLIVersionOverride cli 身份的 IDE 版本（默认 2.168.2，官方 npm 包核对）。
+	CLIVersionOverride string
+	// VSCodeIDEVersion / VSCodeProductVersion vscode 身份的宿主 IDE / 扩展版本
+	//（默认 1.119.0 / 4.12.39997873，Open VSX 解包核对）。
+	VSCodeIDEVersion     string
+	VSCodeProductVersion string
+
 	// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
 	// 空 = 旧行为：X-Product="SaaS"，不设 X-IDE-*（向后兼容，不突变归因）。
 	ClientName string
@@ -807,6 +821,30 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []b
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
 	body = InjectPromptCacheKey(body, uid, conversationID)
 	return body
+}
+
+// cliChatBody 官方 CLI 的 chat 请求体形态：剔除 metadata / conversation_id /
+// previous_response_id（Responses API 与客户端自定义字段），注入 cache_retention
+// =long（官方 resolveCacheRetention 默认），重排 JSON.stringify 紧凑形态后 gzip
+//（productFeatures.RequestBodyGzip）。解析失败时保持原样（不因变换失败拦请求）。
+func cliChatBody(body []byte) []byte {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err == nil && obj != nil {
+		delete(obj, "metadata")
+		delete(obj, "conversation_id")
+		delete(obj, "previous_response_id")
+		if _, ok := obj["cache_retention"]; !ok {
+			obj["cache_retention"] = json.RawMessage(`"` + cliCacheRetentionDefault + `"`)
+		}
+		if remarshal, err := json.Marshal(obj); err == nil {
+			body = remarshal
+		}
+	}
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	_, _ = gw.Write(body)
+	_ = gw.Close()
+	return buf.Bytes()
 }
 
 // effortsSnapshot 返回 effort 能力缓存副本；nil 表示未知（透传不降级）。
@@ -1045,6 +1083,12 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
 	if c.globalOn(a) {
 		prepared = ensureConsoleSystem(prepared)
+	}
+	// cli 身份的请求体形态（官方 CLI：gzip + cache_retention=long + 剔除
+	// Responses API/客户端自定义字段，见 identity_select.go）。Content-Encoding
+	// 在 ChatHeaders 里按同一 profile 补（headers 与 body 变换同源，不各判一次）。
+	if p := c.chatIdentityProfileFor(a); p.BodyGzip {
+		prepared = cliChatBody(prepared)
 	}
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 +

@@ -79,8 +79,8 @@ func TestProtocolPurposeMatrixAndSafeEndpointPreview(t *testing.T) {
 		if p.Purpose == "billing" && (p.Origin != "" || p.MachineHeader || p.SessionHeader) {
 			t.Fatal("billing diagnostic invented headers")
 		}
-		// CN 零漂移：身份矩阵里的 CN 桌面端 UA（E3 实测 5.5.6 / CLI 2.137.1）。
-		if p.Realm == "cn" && p.Purpose == "chat" && p.UserAgent != "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1" {
+		// CN 零漂移：身份矩阵里的 CN 桌面端 UA（E4 实测 5.8.3 / CLI 2.161.0）。
+		if p.Realm == "cn" && p.Purpose == "chat" && p.UserAgent != "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0" {
 			t.Fatal("CN identity changed")
 		}
 		// global（E1）：国际版 5.8.4 + workbuddy-ai 品牌段。

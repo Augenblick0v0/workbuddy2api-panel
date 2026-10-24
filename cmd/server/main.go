@@ -158,6 +158,11 @@ func main() {
 	up.ClientVersion = cfg.Upstream.ClientVersion
 	up.CliVersion = cfg.Upstream.CliVersion
 	up.ClientName = cfg.Upstream.ClientName
+	up.OutboundIdentity = cfg.Upstream.OutboundIdentity
+	up.OutboundIdentityAllowedList = cfg.Upstream.OutboundIdentityAllowedList
+	up.CLIVersionOverride = cfg.Upstream.CLIVersionOverride
+	up.VSCodeIDEVersion = cfg.Upstream.VSCodeIDEVersion
+	up.VSCodeProductVersion = cfg.Upstream.VSCodeProductVersion
 	up.DeviceToken = cfg.Upstream.DeviceToken
 	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
 	up.AccountDeviceTokenOnly.Store(cfg.Upstream.AccountDeviceTokenOnly)

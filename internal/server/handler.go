@@ -725,7 +725,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//     粘性 key 进程内稳定生成；粘性 key 也空时走轮级兜底（TurnKey/TurnRequestID），
 	//     无 user 消息时退化成本请求级随机——轮转内捕获一次即共享；
 	//   - messageID 在 ChatHeaders 内每条消息生成（消息级独立，无需外部可见）。
-	chatMeta := upstream.ChatMeta{ConversationID: session.ResolveConversationID(body), APIRequest: true}
+	// Model 供 vscode 出站身份带 X-Model-ID + monitor_* 时间戳（desktop/cli 不消费）。
+	chatMeta := upstream.ChatMeta{ConversationID: session.ResolveConversationID(body), APIRequest: true, Model: bareModel}
 	if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
 		chatMeta.ConversationRequestID = v
 	} else if turnKey != "" && sessKey != "" {
