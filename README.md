@@ -21,6 +21,20 @@
 > **本项目是 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的增强分支**（fork）。
 > 上游仓库现已删除；本项目**已同步至上游删库前的最后一次更新**（`ea8b1e5`），此后由本分支独立维护演进。
 > 在上游基础上重构了可视化运维层；差异概览见 [与上游的差异](#-与上游的差异)，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留，详见下文。
+>
+> **🔧 维护版本（v1.15.0-panel-maint.1，2026-10-24）**
+>
+> 本版本是 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) `1.14.0-panel-identity.1` 之后的**社区维护 continuation**：上游 panel 仓库停止更新后，本 fork 继续吸收社区实测成果（主要来自 [ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub) v1.7.13–v1.7.33 的已验证修复与能力），并在其之上做本仓库特有的增强。全部改动以独立 commit 落地，可逐项审计。
+>
+> **v1.15.0 相对 1.14.0 的变更：**
+> - **代理检测重做**：默认改为按绑定账号 realm 探测 WorkBuddy 站点连通性（任意 HTTP 状态即视为可达，出口 IP 降为信息项）——国内代理出向 ipify 不通但业务正常的场景不再误报"检测异常"（`egress.probe_mode`，回退 `legacy` 可还原旧行为）
+> - **身份矩阵刷新**：CN 桌面端 5.5.6→5.8.3、CLI 2.137.1→2.161.0（2026-10-18 双区实跑抓包）；新增 **cli**（官方 CodeBuddy CLI 2.168.2 头族 + x-stainless 指纹 + gzip 请求体）与 **vscode**（官方扩展 4.12.39997873 头族）两套可选 chat 出站身份，支持 `auto` 按账号稳定轮换（`upstream.outbound_identity` / `outbound_identities`）
+> - **连接与错误治理**：裸 401 先刷新 token 重试同号再换号；TLS 证书校验失败终止轮转不罚号；HTML 中间层 401/403 不再误判账号终态；工具 Schema 深度规整根除上游 400 code 11129；403/11140 "unusual activity" 风控形态独立分类（2h 冷却 + 停止换号连坐 + 短窗多号触发整域池暂停）
+> - **流式修复**：chunk id 每流唯一（合成帧不再用静态哨兵）；usage 尾帧符合 OpenAI 规范（choices:[]）；首字节前断流自动换号重开；工具调用首片补 `arguments:""`；reasoning-only 聚合按失败处理换号重试
+> - **运维能力**：`/u/{ref}/v1/chat/completions` 按账号定址调试路由；`upstream.models_allowlist` 模型白名单（/v1/models 过滤 + chat 403）；`GET /panel/api/credits/summary` 只读积分汇总；`upstream.chat_base_cn`/`billing_base_cn` 国内上游改址开关；余额刷新 CAS 单飞 + 拟人间隔；可选的模型额度窗口复验扫描（`schedule.quota_scan_enabled`，默认关——探针消耗真实配额）
+> - 感谢 [ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub) 及其贡献者的逆向与实测工作；本仓库按 Go 架构重新实现，行为依据其文档化证据。
+
+
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
