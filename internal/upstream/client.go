@@ -489,6 +489,16 @@ func ParseRateReset(body string) (time.Time, bool) {
 //     拦截形态。判在通用 4xx 兜底**之前**：此前该形态落 ErrClient → 只换号不罚 →
 //     连环 403。带业务信封的 403 已被上方各层捕获，走不到本层。
 //  11. 内容策略/参数错误/其他 4xx —— 通用兜底。
+// looksLikeHTMLPage 判定 body 是否 HTML 页面形态（trim 后以 "<" 开头，含
+// "<!doctype"）。用于把「中间层 HTML 错误页」与 WorkBuddy JSON 业务信封区分开。
+func looksLikeHTMLPage(body string) bool {
+	t := strings.TrimSpace(body)
+	if t == "" {
+		return false
+	}
+	return t[0] == '<'
+}
+
 func Classify(status int, body string) ErrKind {
 	// 11102「该后端无此模型」须最先判：它是「模型在后端不存在」的确定性答复，语义比
 	// 计费/限流都更具体——若不先判，msg 里的 "service info not found" 会被更宽的
@@ -502,17 +512,24 @@ func Classify(status int, body string) ErrKind {
 		return ErrHardCredit
 	}
 	lower := strings.ToLower(body)
+	// HTML 形态收紧（Hub #440 同源问题）：401/4xx 的 HTML body 多为中间层（代理
+	// 认证页/劫持页/网关错误页）而非 WorkBuddy 业务响应——终端标记（sessionDead/
+	// accountFault）只对非 HTML body 生效，避免中间层页面上的偶合词把健康账号
+	// 误判终态（Disable）。HTML 401 落通用 ErrClient：只换号不罚。
+	jsonishBody := !looksLikeHTMLPage(body)
 	// sessionDead / accountFault 先于 status==429：账号级终态等不来自愈，限流状态码
 	// 不得掩盖它们（429+14017 必须 accountFault，401+12153 混排 "rate limit" 必须
 	// sessionDead——此层 marker 是精确词，比限流层的大范围子串更具体，具体优先于宽泛）。
-	for _, m := range sessionDeadMarkers {
-		if strings.Contains(body, m) {
-			return ErrSessionDead
+	if jsonishBody {
+		for _, m := range sessionDeadMarkers {
+			if strings.Contains(body, m) {
+				return ErrSessionDead
+			}
 		}
-	}
-	for _, m := range accountFaultMarkers {
-		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
-			return ErrAccountFault
+		for _, m := range accountFaultMarkers {
+			if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
+				return ErrAccountFault
+			}
 		}
 	}
 	// 14018 是明确的账号积分耗尽业务码。它必须先于通用 429 兜底，否则会被误判为
@@ -530,20 +547,25 @@ func Classify(status int, body string) ErrKind {
 	if status == http.StatusTooManyRequests {
 		return ErrSoftRate
 	}
-	for _, m := range hardMarkers {
-		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
-			return ErrHardCredit
+	// 文案层对 HTML 同样收紧：中间层 HTML 页面上的 quota/限流措辞同样不可信，
+	// HTML 4xx/5xx 一律落状态码分类（403→WAF、404→NotFound、5xx→Server、其余
+	// ErrClient 只换号不罚）。
+	if jsonishBody {
+		for _, m := range hardMarkers {
+			if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
+				return ErrHardCredit
+			}
 		}
-	}
-	for _, m := range softRateMarkers {
-		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
-			return ErrSoftRate
+		for _, m := range softRateMarkers {
+			if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
+				return ErrSoftRate
+			}
 		}
 	}
 	// 11115「prompt is too long」：判在 404/5xx/WAF/内容策略/参数错误/通用 4xx
 	// 之前——请求级语义最具体（上下文超限），须先于宽泛的状态码兜底（404 兜底会
 	// 误归 ErrNotFound 只冷却不透传；ErrClient 只换号，浪费健康号配额）。
-	if isPromptTooLongStatus(status) {
+	if jsonishBody && isPromptTooLongStatus(status) {
 		for _, m := range promptTooLongMarkers {
 			if strings.Contains(body, m) || (m != strings.ToLower(m) && strings.Contains(lower, strings.ToLower(m))) {
 				return ErrPromptTooLong
@@ -580,7 +602,7 @@ func Classify(status int, body string) ErrKind {
 	// 这是误报信号，不罚账号，由网关降级重试处理（见 handler.applyErrorPolicy）。
 	if status >= 400 {
 		for _, m := range contentBlockedMarkers {
-			if strings.Contains(lower, m) {
+			if jsonishBody && strings.Contains(lower, m) {
 				return ErrContentBlocked
 			}
 		}

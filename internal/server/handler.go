@@ -3,6 +3,8 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -547,6 +549,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	defer st.done()
 
 	tried := map[string]bool{}
+	// refreshed401：本请求内已按「401 先刷新再换号」刷新过 token 的账号（每号一次）。
+	refreshed401 := map[string]bool{}
 	var lastErr error
 	// modelBlock 记录本次是否因「模型级冷却」而选不到号（下方 acct==nil 分支填充）。
 	// 默认零值 Blocked=false = 按既有的"没有可用账号"口径报错。
@@ -874,6 +878,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					logfmt.Label(acct.UID, acct.Nickname), terr)
 				break
 			}
+			// 证书校验失败：确定性链路/配置问题（同出口换任何号都必再失败）——终止
+			// 轮转、不罚号（对齐 Hub「证书校验失败不再重试」：重试只会把整池号各烧
+			// 一次在途名额）。MITM 中间人换证书/上游证书链变更都会落到这里。
+			if isCertVerificationFailure(terr) {
+				recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
+				st.status = http.StatusBadGateway
+				lastErr = fmt.Errorf("upstream tls certificate verification failed: %v", terr)
+				log.Printf("WARN: [server] cert verify failure acct=%s: %v (rotation stopped, account not penalized)",
+					logfmt.Label(acct.UID, acct.Nickname), terr)
+				break
+			}
 			// 网络层抖动：只换号，不喂熔断计数（传输层错误对连续失败连坐熔断过于严苛）。
 			// 连败兜底（issue #114）：喂连败计数——连不上上游是「不知道原因的失败」，
 			// 连败 N 次临时出池，单次/偶发不罚（NoteFailures 内部达阈才动作）。
@@ -977,6 +992,23 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadRequest
 				st.outcome = reqlog.OutcomeHTTPError
 				return
+			}
+			// 401 且无 session 终态/账号故障标记（kind==ErrClient 的裸 401）：token 可能
+			// 被服务端提前作废（时钟偏移/撤销/刷新竞态）。先给同号刷一次 token 重试，
+			// 刷新失败才落策略换号（对齐 Hub #441/#439：401 先刷新再换号，避免把
+			// 只是 token 过期的健康号轮转一遍）。每账号每请求最多刷一次，防 401 循环。
+			if status == http.StatusUnauthorized && kind == upstream.ErrClient && !refreshed401[acct.UID] {
+				refreshed401[acct.UID] = true
+				if rerr := h.cfg.Upstream.RefreshToken(acct); rerr == nil {
+					log.Printf("INFO: [server] 401 -> token refreshed, retrying acct=%s",
+						logfmt.Label(acct.UID, acct.Nickname))
+					delete(tried, acct.UID) // 同号拿新 token 再来一次（不占 tried 名额）
+					fail(acct.UID)
+					if !rotateBackoff(i, r.Context()) {
+						break // ctx 取消：终止轮转（401 刷新重试）
+					}
+					continue
+				}
 			}
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
@@ -1304,6 +1336,30 @@ var errUpstreamTimeout = errors.New("upstream timeout")
 // isUpstreamTimeout 判断这一跳的失败是否属于「上游超时 / 停滞」。超时不是账号的
 // 问题，换号注定白换（同一份请求撞同一个慢上游），必须止损：不轮转、不罚号。
 // 三态判定见传输层错误分支的注释。
+// isCertVerificationFailure 判定传输错误是否为 TLS 证书校验失败族
+//（tls.CertificateVerificationError / x509 的 UnknownAuthority / Hostname /
+// ConstraintViolation）。这类错误是确定性的（同链路换号必复现），调用方应终止
+// 轮转而非继续换号。
+func isCertVerificationFailure(err error) bool {
+	var certErr *tls.CertificateVerificationError
+	if errors.As(err, &certErr) {
+		return true
+	}
+	var unknownAuth x509.UnknownAuthorityError
+	if errors.As(err, &unknownAuth) {
+		return true
+	}
+	var hostErr x509.HostnameError
+	if errors.As(err, &hostErr) {
+		return true
+	}
+	var constraintErr x509.ConstraintViolationError
+	if errors.As(err, &constraintErr) {
+		return true
+	}
+	return false
+}
+
 func isUpstreamTimeout(err error, clientGone bool) bool {
 	if err == nil {
 		return false
