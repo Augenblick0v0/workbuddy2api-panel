@@ -583,7 +583,7 @@ func (p *Panel) proxyTest(w http.ResponseWriter, r *http.Request) {
 		proxyError(w, 409, "revision_conflict")
 		return
 	}
-	result, err := p.cfg.Egress.Probe(r.Context(), id)
+	result, err := p.cfg.Egress.Probe(r.Context(), id, p.slotRealms(id)...)
 	if err != nil {
 		var ee *egress.EgressError
 		code := "proxy_probe_failed"
@@ -594,4 +594,31 @@ func (p *Panel) proxyTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "result": result})
+}
+
+// slotRealms lists the realms of the accounts currently bound to a slot, so a
+// workbuddy-mode probe only walks the WorkBuddy legs that route through it.
+// Without a pool or without bound accounts it returns nil (= probe both legs).
+func (p *Panel) slotRealms(id string) []string {
+	if p.cfg.Pool == nil {
+		return nil
+	}
+	bound := map[string]bool{}
+	for uid, slotID := range p.cfg.Egress.Snapshot().Bindings {
+		if slotID == id {
+			bound[uid] = true
+		}
+	}
+	if len(bound) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var realms []string
+	for _, st := range p.cfg.Pool.List() {
+		if bound[st.UID] && st.Realm != "" && !seen[st.Realm] {
+			seen[st.Realm] = true
+			realms = append(realms, st.Realm)
+		}
+	}
+	return realms
 }

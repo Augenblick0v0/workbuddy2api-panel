@@ -23,7 +23,7 @@ func TestProxyProbeWAFIsolation(t *testing.T) {
 		w.Write([]byte(`{"ip":"203.0.113.8"}`))
 	}))
 	defer proxy.Close()
-	m := managerWithSlot(t, slotFor(t, proxy.URL), egress.Options{AllowedCIDRs: []string{"127.0.0.0/8"}, ProbeURL: "http://probe.invalid/ip"})
+	m := managerWithSlot(t, slotFor(t, proxy.URL), egress.Options{AllowedCIDRs: []string{"127.0.0.0/8"}, ProbeURL: "http://probe.invalid/ip", ProbeMode: "legacy"})
 	s := m.Snapshot()
 	_, err := m.Update(s.Revision, func(c *egress.Config) error {
 		s := c.Slots["slot-1"]
@@ -69,7 +69,7 @@ func TestProxyProbeFailureRetainsSuccessTime(t *testing.T) {
 		w.Write([]byte(`{"ip":"203.0.113.9"}`))
 	}))
 	defer proxy.Close()
-	m := managerWithSlot(t, slotFor(t, proxy.URL), egress.Options{AllowedCIDRs: []string{"127.0.0.0/8"}, ProbeURL: "http://probe.invalid/ip"})
+	m := managerWithSlot(t, slotFor(t, proxy.URL), egress.Options{AllowedCIDRs: []string{"127.0.0.0/8"}, ProbeURL: "http://probe.invalid/ip", ProbeMode: "legacy"})
 	first, err := m.Probe(context.Background(), "slot-1")
 	if err != nil || first.SuccessfulAt.IsZero() {
 		t.Fatal(first, err)
@@ -122,5 +122,103 @@ func TestProxyProbeResponseLimit(t *testing.T) {
 	result, e := m.Probe(context.Background(), "slot-1")
 	if e == nil || result.Status != "error" || result.IP != "" {
 		t.Fatal("oversize probe accepted")
+	}
+}
+
+func TestProxyProbeWorkBuddyReachableDespiteIPFail(t *testing.T) {
+	// The WorkBuddy leg answers 401 — a WAF/auth page still proves the route
+	// reaches the realm's site; the ipify legs fail and stay informational.
+	wb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer wb.Close()
+	m := managerWithSlot(t, slotFor(t, wb.URL), egress.Options{
+		AllowedCIDRs:   []string{"127.0.0.0/8"},
+		WBCNTarget:     wb.URL,
+		WBGlobalTarget: wb.URL,
+		ProbeURL:       "http://probe.invalid/ip",
+		ProbeHTTPSURL:  "http://probe.invalid/secure",
+	})
+	result, e := m.Probe(context.Background(), "slot-1")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if result.Status != "ok" || result.SuccessfulAt.IsZero() {
+		t.Fatalf("workbuddy-mode probe gated on informational IP: %+v", result)
+	}
+	if result.IPStatus != "error" || result.IP != "" {
+		t.Fatalf("failed IP lookup should stay informational: %+v", result)
+	}
+	if len(result.WBTargets) != 2 {
+		t.Fatalf("expected cn+global legs, got %+v", result.WBTargets)
+	}
+	for _, leg := range result.WBTargets {
+		if leg.Status != "ok" || leg.HTTPStatus != http.StatusUnauthorized {
+			t.Fatalf("401 from the realm site must count as reachable: %+v", leg)
+		}
+	}
+}
+
+func TestProxyProbeWorkBuddyRealmNarrowing(t *testing.T) {
+	var globalProbes atomic.Int64
+	wb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer wb.Close()
+	global := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		globalProbes.Add(1)
+		w.WriteHeader(200)
+	}))
+	defer global.Close()
+	m := managerWithSlot(t, slotFor(t, wb.URL), egress.Options{
+		AllowedCIDRs:   []string{"127.0.0.0/8"},
+		WBCNTarget:     wb.URL,
+		WBGlobalTarget: global.URL,
+		ProbeURL:       "http://probe.invalid/ip",
+	})
+	result, e := m.Probe(context.Background(), "slot-1", "cn")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if result.Status != "ok" || len(result.WBTargets) != 1 || result.WBTargets[0].Realm != "cn" {
+		t.Fatalf("cn-only probe should walk one leg: %+v", result)
+	}
+	if globalProbes.Load() != 0 {
+		t.Fatal("global leg probed despite cn-only realms")
+	}
+}
+
+func TestProxyProbeWorkBuddyUnreachable(t *testing.T) {
+	wb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	slot := slotFor(t, wb.URL)
+	wb.Close() // the proxy itself is dead: every leg must fail on transport
+	m := managerWithSlot(t, slot, egress.Options{
+		AllowedCIDRs:   []string{"127.0.0.0/8"},
+		WBCNTarget:     "http://wb.invalid/",
+		WBGlobalTarget: "http://wb.invalid/",
+		ProbeURL:       "http://probe.invalid/ip",
+	})
+	result, e := m.Probe(context.Background(), "slot-1")
+	if e == nil || result.Status != "error" {
+		t.Fatalf("dead proxy must fail the workbuddy gate: %+v", result)
+	}
+	for _, leg := range result.WBTargets {
+		if leg.Status != "error" {
+			t.Fatalf("dead proxy must fail every leg: %+v", leg)
+		}
+	}
+}
+
+func TestProxyProbeLegacyModeKeepsIPGate(t *testing.T) {
+	wb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(401) }))
+	defer wb.Close()
+	m := managerWithSlot(t, slotFor(t, wb.URL), egress.Options{
+		AllowedCIDRs:   []string{"127.0.0.0/8"},
+		ProbeMode:      "legacy",
+		WBCNTarget:     wb.URL,
+		WBGlobalTarget: wb.URL,
+		ProbeURL:       "http://probe.invalid/ip",
+	})
+	result, e := m.Probe(context.Background(), "slot-1")
+	if e == nil || result.Status != "error" || len(result.WBTargets) != 0 {
+		t.Fatalf("legacy mode must keep the IP gate and skip WB legs: %+v", result)
 	}
 }

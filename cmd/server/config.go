@@ -24,8 +24,17 @@ type Config struct {
 	StateFile string `json:"state_file"` // ./data/state.json
 	Egress    struct {
 		// Explicit private proxy networks only; metadata/link-local stay blocked.
-		AllowedProxyCIDRs         []string `json:"allowed_proxy_cidrs"`
-		IsolateAccountConnections bool     `json:"isolate_account_connections"`
+		AllowedProxyCIDRs []string `json:"allowed_proxy_cidrs"`
+		// IsolateAccountConnections 按账号分池 RPC/SSE 连接；缺省 true。
+		IsolateAccountConnections bool `json:"isolate_account_connections"`
+		// ProbeMode 选代理检测闸门：缺省 "workbuddy"（按绑定账号 realm 探
+		// WorkBuddy 站点连通性，出口 IP 仅信息项）；"legacy" 维持旧版出口
+		// IP 闸门（ipify 200+合法 IP 才算通过）。
+		ProbeMode string `json:"probe_mode"`
+		// WBCNProbeURL / WBGlobalProbeURL 覆盖两条 WorkBuddy 连通性探测腿
+		// 的目标（缺省 copilot.tencent.com / www.workbuddy.ai 根路径）。
+		WBCNProbeURL     string `json:"wb_probe_cn"`
+		WBGlobalProbeURL string `json:"wb_probe_global"`
 	} `json:"egress"`
 
 	Panel struct {
@@ -277,6 +286,9 @@ func Default() *Config {
 	c.Upstream.TimeoutSeconds = 120
 	c.Upstream.AccountDeviceTokenOnly = true
 	c.Egress.IsolateAccountConnections = true
+	// ProbeMode 缺省 workbuddy：按 realm 探 WorkBuddy 站点连通性（国内代理
+	// 出向 ipify 不通但业务正常的场景不再误报异常）；显式 "legacy" 回旧闸门。
+	c.Egress.ProbeMode = "workbuddy"
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
 	c.Upstream.IdleTimeoutSeconds = 0

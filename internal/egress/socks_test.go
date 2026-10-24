@@ -232,7 +232,7 @@ func TestSOCKSHTTPSAndFailureClosed(t *testing.T) {
 	base := http.DefaultTransport.(*http.Transport).Clone()
 	base.TLSClientConfig = &tls.Config{RootCAs: roots}
 	m := managerWithSlot(t, slotFor(t, "socks5://"+f.listener.Addr().String()), egress.Options{
-		BaseTransport: base, AllowedCIDRs: []string{"127.0.0.0/8"}, ProbeURL: target.URL,
+		BaseTransport: base, AllowedCIDRs: []string{"127.0.0.0/8"}, ProbeMode: "legacy", ProbeURL: target.URL,
 	})
 	result, err := m.Probe(context.Background(), "slot-1")
 	if err != nil || result.IP != "203.0.113.11" {

@@ -41,6 +41,21 @@ type ProbeResult struct {
 	ErrorReason  string    `json:"error_reason,omitempty"`
 	ProxyStatus  int       `json:"proxy_status,omitempty"`
 	VerifiedIP   string    `json:"verified_ip,omitempty"`
+	// WBTargets records the WorkBuddy reachability legs of a workbuddy-mode
+	// probe. Absent on legacy probes and on results saved by older builds.
+	WBTargets []WBTargetResult `json:"wb_targets,omitempty"`
+}
+
+// WBTargetResult is one WorkBuddy reachability leg. Any HTTP answer from the
+// realm's site (including 401/403/404, e.g. a WAF page) counts as reachable;
+// only transport failures (DNS, connect, TLS, timeout) do not.
+type WBTargetResult struct {
+	Realm      string `json:"realm"`
+	URL        string `json:"url,omitempty"`
+	Status     string `json:"status"`
+	HTTPStatus int    `json:"http_status,omitempty"`
+	ErrorCode  string `json:"error_code,omitempty"`
+	LatencyMS  int64  `json:"latency_ms,omitempty"`
 }
 type Config struct {
 	SchemaVersion int               `json:"schema_version"`
@@ -73,7 +88,14 @@ type Options struct {
 	AllowedCIDRs              []string
 	ProbeURL                  string
 	ProbeHTTPSURL             string // Test-only dual-phase override; never accepted by the management API.
-	Resolver                  Resolver
+	// ProbeMode picks the probe gate: "" / "workbuddy" gate on WorkBuddy
+	// reachability (realm-aware; the exit-IP lookup stays informational),
+	// "legacy" keeps the exit-IP gate of earlier versions.
+	ProbeMode string
+	// WBCNTarget / WBGlobalTarget override the two WorkBuddy reachability legs.
+	WBCNTarget     string
+	WBGlobalTarget string
+	Resolver       Resolver
 	// FailureCooldown bounds a transport-fault pause. Zero uses 15 seconds.
 	// It is a process policy, not persisted or writable via management APIs.
 	FailureCooldown time.Duration

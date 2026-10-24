@@ -182,6 +182,9 @@ func main() {
 		BaseTransport:             baseTransport,
 		AllowedCIDRs:              cfg.Egress.AllowedProxyCIDRs,
 		IsolateAccountConnections: cfg.Egress.IsolateAccountConnections,
+		ProbeMode:                 cfg.Egress.ProbeMode,
+		WBCNTarget:                cfg.Egress.WBCNProbeURL,
+		WBGlobalTarget:            cfg.Egress.WBGlobalProbeURL,
 	})
 	if err != nil {
 		log.Fatalf("egress startup: %s", err)

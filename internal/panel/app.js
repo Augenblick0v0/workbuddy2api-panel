@@ -1237,13 +1237,25 @@ function proxyProbeHTML(slot) {
     reasons[p.error_reason],
     p.error_code,
   ].filter(Boolean).map(esc).join(' · ');
-  return '<div class="proxy-probe-row"><span class="note">出口 IP</span><span class="tag ' + (ipOK ? 'ok' : 'warn') + '">' + esc(p.ip || 'IP 未知') + '</span>' +
+  const realmNames = { cn: '国内', global: '国际' };
+  const wbLegs = Array.isArray(p.wb_targets) ? p.wb_targets : [];
+  const wbOK = wbLegs.length > 0 && wbLegs.every(t => t.status === 'ok');
+  const wbRow = wbLegs.length ? '<div class="proxy-probe-row"><span class="note">WorkBuddy 连通</span><span class="tag ' + (wbOK ? 'ok' : 'warn') + '">' +
+    (wbOK ? '可达' : '不可达') + '</span>' +
+    wbLegs.map(t => '<span class="hint">' + esc(realmNames[t.realm] || t.realm) + ' ' +
+      (t.status === 'ok' ? 'HTTP ' + esc(t.http_status || '?') + ' · ' + esc(t.latency_ms || 0) + ' ms'
+        : '连接失败' + (t.error_code ? ' · ' + esc(t.error_code) : '')) + '</span>').join('') +
+    '</div>' : '';
+  const ipTagClass = wbLegs.length ? (ipOK ? 'ok' : 'note') : (ipOK ? 'ok' : 'warn');
+  return wbRow +
+    '<div class="proxy-probe-row"><span class="note">出口 IP' + (wbLegs.length ? '（信息）' : '') + '</span><span class="tag ' + ipTagClass + '">' + esc(p.ip || (wbLegs.length ? '未知 · 不影响判定' : 'IP 未知')) + '</span>' +
     (httpOnly ? '<span class="hint">HTTP 观测 · 未验证 HTTPS</span>' : (!ipOK && p.ip ? '<span class="hint">历史观测</span>' : '')) + '</div>' +
+    (wbLegs.length ? '' :
     '<div class="proxy-probe-row"><span class="note">HTTPS 检测</span><span class="tag ' + (httpsOK ? 'ok' : 'warn') + '">' +
     (httpsOK ? '通过' : httpsStatus === 'error' ? '失败' : '尚未完成') + '</span>' +
-    (!httpsOK && failure ? '<span class="hint">' + failure + '</span>' : '') + '</div>' +
+    (!httpsOK && failure ? '<span class="hint">' + failure + '</span>' : '') + '</div>') +
     (p.status === 'error' ? '<div class="hint">检测失败不会单独阻止账号请求；实际请求仍经绑定代理，连接失败不回退直连。</div>' : '') +
-    (httpsOK ? '<div class="hint">仅固定 HTTPS 探针通过，不代表账号登录或业务验证成功。</div>' : '') +
+    (wbLegs.length ? (wbOK ? '<div class="hint">判定只看 WorkBuddy 站点连通（任意 HTTP 状态即可）；出口 IP 仅为信息项。</div>' : '') : (httpsOK ? '<div class="hint">仅固定 HTTPS 探针通过，不代表账号登录或业务验证成功。</div>' : '')) +
     (ipTime > 0 ? '<div class="hint">IP 观测：' + esc(fmtLocalDateTime(ipTime)) + '</div>' : '') +
     '<div class="hint">上次成功（全检测）：' + esc(success ? fmtLocalDateTime(success) : '尚无') +
     ' · 最近尝试：' + esc(time ? fmtLocalDateTime(time) : '时间未知') + ' · ' + esc(p.latency_ms || 0) + ' ms' +

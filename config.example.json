@@ -5,7 +5,10 @@
   "state_file": "./data/state.json",
   "egress": {
     "isolate_account_connections": true,
-    "allowed_proxy_cidrs": []
+    "allowed_proxy_cidrs": [],
+    "probe_mode": "workbuddy",
+    "wb_probe_cn": "",
+    "wb_probe_global": ""
   },
   "server": {
     "read_timeout": "300s"

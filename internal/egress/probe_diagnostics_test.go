@@ -41,7 +41,7 @@ func TestProbeHTTPIPDoesNotHideConnectFailure(t *testing.T) {
 	}))
 	defer proxy.Close()
 	m := managerWithSlot(t, slotFor(t, proxy.URL), egress.Options{
-		AllowedCIDRs: []string{"127.0.0.0/8"}, ProbeURL: "http://ip.invalid/",
+		AllowedCIDRs: []string{"127.0.0.0/8"}, ProbeMode: "legacy", ProbeURL: "http://ip.invalid/",
 		ProbeHTTPSURL: "https://tls.invalid/",
 	})
 	result, err := m.Probe(context.Background(), "slot-1")
@@ -129,7 +129,7 @@ func TestProbeHTTPSCanSucceedWhenHTTPFails(t *testing.T) {
 	base.TLSClientConfig = &tls.Config{RootCAs: roots}
 	m := managerWithSlot(t, slotFor(t, proxy.URL), egress.Options{
 		BaseTransport: base, AllowedCIDRs: []string{"127.0.0.0/8"},
-		ProbeURL: "http://ip.invalid/", ProbeHTTPSURL: target.URL,
+		ProbeMode: "legacy", ProbeURL: "http://ip.invalid/", ProbeHTTPSURL: target.URL,
 	})
 	result, err := m.Probe(context.Background(), "slot-1")
 	if err != nil || result.Status != "ok" || result.HTTPSStatus != "ok" ||
@@ -148,7 +148,7 @@ func TestHTTPOnlyObservationDoesNotMoveWAFToAnotherExit(t *testing.T) {
 	}))
 	defer proxy.Close()
 	m := managerWithSlot(t, slotFor(t, proxy.URL), egress.Options{
-		AllowedCIDRs: []string{"127.0.0.0/8"}, ProbeURL: "http://ip.invalid/", ProbeHTTPSURL: "https://tls.invalid/",
+		AllowedCIDRs: []string{"127.0.0.0/8"}, ProbeMode: "legacy", ProbeURL: "http://ip.invalid/", ProbeHTTPSURL: "https://tls.invalid/",
 	})
 	_, err := m.Update(m.Snapshot().Revision, func(c *egress.Config) error {
 		s := c.Slots["slot-1"]

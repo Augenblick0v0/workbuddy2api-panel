@@ -16,7 +16,9 @@ func TestProxyWAFLateResponseCanonicalRoute(t *testing.T) {
 	}))
 	defer proxy.Close()
 	m := managerWithSlot(t, slotFor(t, proxy.URL), egress.Options{
-		AllowedCIDRs: []string{"127.0.0.0/8"}, ProbeURL: "http://probe.invalid/ip",
+		// legacy gate: this test exercises IP canonicalization, not the
+		// WorkBuddy reachability legs (which would hit the real sites).
+		AllowedCIDRs: []string{"127.0.0.0/8"}, ProbeURL: "http://probe.invalid/ip", ProbeMode: "legacy",
 	})
 	_, err := m.Update(m.Snapshot().Revision, func(c *egress.Config) error {
 		s := c.Slots["slot-1"]
