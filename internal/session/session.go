@@ -41,6 +41,8 @@ type Config struct {
 	// 模型级限额后对**其他模型**仍可用（issue #31 豁免），此时若只按账号级可用性
 	// 校验，会话会被钉在这个号上反复失败——正是"限额后换不动号"的观感来源。
 	AvailableForModel func(model string) []string
+	// PreferNew 仅筛选新分配的候选（保留虚拟实例）；已有健康绑定不受影响。
+	PreferNew func(uids []string) []string
 }
 
 // Router 会话粘性路由器。
@@ -187,6 +189,9 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	}
 
 	uids := r.availableSlice(model)
+	if r.cfg.PreferNew != nil {
+		uids = r.cfg.PreferNew(uids)
+	}
 	if len(uids) == 0 {
 		return "", false
 	}

@@ -95,6 +95,7 @@ type Status struct {
 	// 「授权/session 终态，需人工 revive」，paused 是「运维临时让位」（多号轮换场景），
 	// 账号本身健康，只是暂不接流量。
 	Paused          bool       `json:"paused,omitempty"`
+	Priority        int        `json:"priority"` // 0..100，越大越优先；已有会话绑定不迁移
 	SuccessCount    int64      `json:"success_count,omitempty"`
 	ErrTotal        int64      `json:"err_total,omitempty"`
 	LastSuccessTime time.Time  `json:"last_success,omitempty"`
@@ -205,6 +206,7 @@ type entry struct {
 	// 但保号任务遍历只按 Disabled 过滤，故 paused 号天然继续参与签到 / 活跃上报 /
 	// 保活 / 余额刷新。持久化（state.json），跨重启不丢。
 	paused         bool
+	priority       int // 运维优先级，持久化；独立于健康/惩罚状态
 	reason         string
 	lastUsed       time.Time // 最近被选中时刻（防并发撞号）
 	// usedSeq 单调递增的选中序号：每次被 pick 选中时取 p.pickSeq 自增值。
@@ -421,6 +423,7 @@ type stateAccount struct {
 	Credits      int64     `json:"credits"`
 	CreditsTotal int64     `json:"credits_total,omitempty"`
 	Disabled     bool      `json:"disabled"`
+	Priority     int       `json:"priority,omitempty"`
 	Paused       bool      `json:"paused,omitempty"`
 	Reason       string    `json:"reason,omitempty"`
 	Until        time.Time `json:"until,omitempty"`

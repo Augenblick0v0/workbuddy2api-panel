@@ -53,6 +53,10 @@ func (p *Pool) WeightedAvailableUIDsForModelRealm(model, realm string) []string 
 		if !e.healthyForModel(now, model) {
 			continue
 		}
+		// 与普通选号同口径：不可用代理或收费模型触底号不能占住最高优先级。
+		if !p.routeOK(uid) || p.floorBlockedForRealmModel(e, model, realm, now) {
+			continue
+		}
 		if p.inFlightFull(e) {
 			continue
 		}

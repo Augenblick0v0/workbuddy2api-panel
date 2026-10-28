@@ -32,7 +32,7 @@ import (
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-const appVersion = "1.15.0-panel-maint.1"
+const appVersion = "1.15.1"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -121,6 +121,7 @@ func main() {
 			// realm 感知闭包：带前缀模型名按 realm 过滤可用账号（跨 realm 不泄漏）；
 			// 裸名走 cn（现状零回归）。闭包内部 resolveModel 剥前缀，再按 realm 过滤。
 			AvailableForModel: realmAwareAvailableForModel(p),
+			PreferNew:         p.PreferNew,
 		})
 		sessRouter.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
 		sessRouter.StartGC()

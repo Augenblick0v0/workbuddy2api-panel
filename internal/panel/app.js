@@ -443,6 +443,7 @@ function renderAccounts(list) {
       '</span></td>' +
       '<td class="num" style="color:var(--ink-3)">' + ago(s.last_success) + '</td>' +
       '<td class="acts">' +
+        '<button class="xs ghost" data-a="priority" data-u="' + esc(s.uid) + '" data-priority="' + (s.priority || 0) + '" title="数值越大越优先；已有会话保持绑定">优先级 ' + (s.priority || 0) + '</button>' +
         // 企业版无个人成长体系（签到 400「企业账号不支持该操作」/ 成长任务 403）：
         // 不渲染「签到」「任务」按钮，只留「额度」——点它走 /balance，企业额度由
         // upstream 的 get-enterprise-user-usage 口径填充。
@@ -528,11 +529,24 @@ $('accBody').addEventListener('click', async ev => {
   const b = ev.target.closest('button[data-a]');
   if (!b) return;
   const u = b.dataset.u, a = b.dataset.a;
+  let priority;
+  if (a === 'priority') {
+    const value = prompt('调度优先级（0–100，数值越大越优先；已有会话保持绑定）', b.dataset.priority || '0');
+    if (value === null) return;
+    if (!/^\d+$/.test(value.trim()) || Number(value) > 100) {
+      toast('优先级必须是 0–100 的整数', 'err');
+      return;
+    }
+    priority = Number(value);
+  }
   if (a === 'remove' && !confirm('移除账号将删除池状态与 auths/ 下的凭证文件，且不可恢复。确认移除？')) return;
   if (a === 'disable' && !confirm('禁用后该账号不再参与选号（保号任务默认也跳过），需手动解冻才能恢复。若只是想临时让位、仍要保号，请改用「暂停选号」。确认禁用？')) return;
   b.disabled = true;
   try {
-    if (a === 'checkin') {
+    if (a === 'priority') {
+      await api('accounts/' + encodeURIComponent(u) + '/priority', { method: 'POST', body: JSON.stringify({ priority }) });
+      toast('优先级已更新为 ' + priority, 'ok');
+    } else if (a === 'checkin') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/checkin', { method: 'POST' });
       toast('签到完成' + (r.credits != null ? '，积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + (r.checkin_message ? '（' + r.checkin_message + '）' : ''), 'ok');
     } else if (a === 'balance') {

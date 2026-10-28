@@ -85,6 +85,20 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
 		return p.pickEarliestExpiryLocked(tried, now, realm, reqModel)
 	}
+	// 优先级只作用于可用候选；同级继续使用原有成本分层和加权策略。
+	bestPriority := cands[0].priority
+	for _, e := range cands[1:] {
+		if e.priority > bestPriority {
+			bestPriority = e.priority
+		}
+	}
+	preferred := cands[:0]
+	for _, e := range cands {
+		if e.priority == bestPriority {
+			preferred = append(preferred, e)
+		}
+	}
+	cands = preferred
 	// top5 短名单按权重降序截断（而非 credits 单纯降序）：否则闲置补偿根本进不了
 	// 短名单决策，低 credits 但久置的账号会永远排不进 top5。
 	// maxCredits 统一用**全集口径**（tier 过滤前的全部 healthy 候选）：截断排序与
