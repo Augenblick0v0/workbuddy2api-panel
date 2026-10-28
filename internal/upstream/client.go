@@ -231,11 +231,6 @@ var softRateResetLoc = time.FixedZone("UTC+8", 8*60*60)
 // SoftRateResetLoc 暴露重置时间的固定时区（供测试构造/断言同一时区口径）。
 func SoftRateResetLoc() *time.Location { return softRateResetLoc }
 
-// modelRateLimitCode 明确指向「模型级 429 限流」的业务 code。
-// 上游用它表达"该模型的使用量超限"（code 6004，msg 带「将在 … 重置」），
-// 而不是账号整体被限流——账号健康，只是这个模型此刻被限（issue #31）。
-const modelRateLimitCode = "6004"
-
 // softRateResetPatternCN/EN 匹配重置文案（CN「将在 … 重置」/ global 域英文
 // "reset at <固定格式时间>"），捕获中间的时间串。
 const softRateResetPatternCN = `将在 (.+?) 重置`
@@ -245,7 +240,6 @@ const softRateResetPatternEN = `(?i)reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2
 // 分类、每个限流 body 上调用，函数体内 MustCompile 是纯浪费；错误风暴（429
 // 轰炸）时尤甚。模式串均为纯常量。regexp 并发安全（匹配只读），无需额外锁。
 var (
-	reModelRateLimit  = regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCode + `"?`)
 	reSoftRateResetCN = regexp.MustCompile(softRateResetPatternCN)
 	reSoftRateResetEN = regexp.MustCompile(softRateResetPatternEN)
 )
@@ -253,11 +247,56 @@ var (
 // softRateTimeLayout 上游重置时间的格式（无时区后缀；时区固定 UTC+8）。
 const softRateTimeLayout = "2006-01-02 15:04:05"
 
-// IsModelRateLimit 报告 429 body 是否明确指向模型级限流（业务 code 6004）。
-// 用于区分"账号级软限流"（按账号冷却）与"模型级用量限流"（切模型即可用）。
+// IsModelRateLimit recognizes explicit model quota errors in the business envelope.
+// 6000 is ambiguous without the upstream instruction to switch models; generic
+// 6000 remains account-scoped. Never interpret identifiers or arbitrary data as codes.
 func IsModelRateLimit(body string) bool {
-	// `"code":6004` / `"code": 6004` / `"code":"6004"` 均可命中（JSON 空格容差）。
-	return reModelRateLimit.MatchString(body)
+	var root map[string]json.RawMessage
+	if json.Unmarshal([]byte(body), &root) != nil {
+		return false
+	}
+	if _, hasChoices := root["choices"]; hasChoices {
+		return false
+	}
+	nodes := []map[string]json.RawMessage{root}
+	var nested map[string]json.RawMessage
+	if json.Unmarshal(root["error"], &nested) == nil && nested != nil {
+		nodes = append(nodes, nested)
+	}
+	for _, node := range nodes {
+		code := strings.TrimSpace(string(node["code"]))
+		var str string
+		if json.Unmarshal(node["code"], &str) == nil {
+			code = str
+		}
+		if code == "6004" {
+			return true
+		}
+		if code != "6000" {
+			continue
+		}
+		messages := []string{}
+		for _, key := range []string{"msg", "message"} {
+			var msg string
+			if json.Unmarshal(node[key], &msg) == nil {
+				messages = append(messages, msg)
+			}
+		}
+		var display map[string]json.RawMessage
+		if json.Unmarshal(node["displayMsg"], &display) == nil {
+			var en string
+			if json.Unmarshal(display["en"], &en) == nil {
+				messages = append(messages, en)
+			}
+		}
+		for _, msg := range messages {
+			lower := strings.ToLower(msg)
+			if strings.Contains(msg, "切换其他模型") || strings.Contains(lower, "switch to other models") || strings.Contains(lower, "switch to another model") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // modelBlockCode 明确指向「该后端无此模型」的业务 code。
@@ -573,6 +612,9 @@ func Classify(status int, body string) ErrKind {
 	// 信号：上游既然给了 429，就按限流语义处理（宁可短冷却自愈，不可长冷却弃号）；
 	// 真正的余额耗尽由 402（上层）或 14018（上层）捕获，非 429 状态码的 quota
 	// 措辞仍走下方 hardMarkers（历史语义不变）。
+	if IsModelRateLimit(body) {
+		return ErrSoftRate
+	}
 	if IsModelBusy(status, body) {
 		return ErrModelBusy
 	}

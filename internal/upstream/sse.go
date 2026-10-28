@@ -170,6 +170,9 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 					if Classify(http.StatusOK, payload) == ErrModelBusy {
 						return map[string]any{"usage": usage}, NewModelBusyError(http.StatusTooManyRequests, payload, nil)
 					}
+					if IsModelRateLimit(payload) {
+						return map[string]any{"usage": usage}, &Error{Kind: FrameKind(payload), Status: http.StatusTooManyRequests, Msg: payload}
+					}
 					if v, ok := chunk["id"].(string); ok && id == "" {
 						id = v
 					}
@@ -586,7 +589,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
 			_, hasErr := obj["error"]
 			rootBusy := !hasErr && Classify(http.StatusOK, payload) == ErrModelBusy
-			if hasErr || rootBusy {
+			if hasErr || rootBusy || IsModelRateLimit(payload) {
 				// 旁路通知（账号处置用）：原始 payload 交给观察者，透传字节不变。
 				if o.onErrorFrame != nil {
 					o.onErrorFrame(payload)

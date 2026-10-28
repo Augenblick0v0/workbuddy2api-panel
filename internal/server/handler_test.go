@@ -189,7 +189,6 @@ func TestChatBadParams400CarriesUpstreamBody(t *testing.T) {
 	}
 }
 
-
 func TestChatNonStreamAggregates(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		if authz != "Bearer at1" {
@@ -707,9 +706,8 @@ func TestChat6004ModelResetCoolsToParsedTime(t *testing.T) {
 	}
 }
 
-// TestChat6004WithoutResetFallsBackToBackoff 6004 无时间文案 → 退回 600s 基数软冷却
-// （现状不变）。
-func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
+// Explicit model limits without a reset use the configured base in the model ledger.
+func TestChat6004WithoutResetUsesModelCooldown(t *testing.T) {
 	var calls int
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		calls++
@@ -732,15 +730,17 @@ func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	st, _ := p.Status("bad")
-	if !st.Cooling || st.CoolKind != "soft_rate" {
-		t.Fatalf("bad should be soft cooling: %+v", st)
-	}
-	// 冷却时长 = 注入 soft 基数(60s)，非解析时间（无重置文案）。
-	if st.CoolRemaining <= 0 || st.CoolRemaining > 60 {
-		t.Errorf("cool_remaining_sec=%d want ~60 (soft base, not parsed)", st.CoolRemaining)
+	if st.Cooling {
+		t.Fatalf("model limit must not cool account: %+v", st)
 	}
 	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" || st.RateLimitedModels[0].Kind != "rate_limit" {
-		t.Fatalf("rate-limited models=%+v, want audit row for glm-5.3", st.RateLimitedModels)
+		t.Fatalf("missing model ledger: %+v", st.RateLimitedModels)
+	}
+	if d := time.Until(st.RateLimitedModels[0].Until); d <= 0 || d > time.Minute {
+		t.Fatalf("model cooldown=%v", d)
+	}
+	if p.PickByUIDForModel("bad", "glm-5.3") != nil || p.PickByUIDForModel("bad", "hy3-x") == nil {
+		t.Fatal("wrong model isolation")
 	}
 }
 

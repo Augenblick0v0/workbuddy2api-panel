@@ -126,6 +126,19 @@ func TestIsModelRateLimit(t *testing.T) {
 		// 6004：模型级限流（issue #31 的核心场景）。
 		{`{"code":6004,"msg":"将在 2026-09-11 18:33:27 UTC+8 重置"}`, true},
 		{`{"code": 6004,"msg":"x"}`, true},
+		{`{"code":6000,"msg":"您的使用量已超出频率限制，您也可以切换其他模型继续使用。"}`, true},
+		{`{"error":{"code":"6000","message":"切换其他模型继续使用"}}`, true},
+		{`{"code":6000,"displayMsg":{"en":"Please switch to another model."}}`, true},
+		{`{"code":"6004","message":"limit"}`, true},
+		{`{"code":6000,"msg":"account rate limit"}`, false},
+		{`{"code":60040,"msg":"切换其他模型"}`, false},
+		{`{"code":"6004extra"}`, false},
+		{`{"id":"6004","msg":"切换其他模型"}`, false},
+		{`{"code":6000,"data":{"code":6004}}`, false},
+		{`not json "code":6004`, false},
+		{`{"code":6004.5}`, false},
+		{`{"code":6000,"msg":"limit","data":{"msg":"切换其他模型"}}`, false},
+
 		// 其他 code（非模型级限流）→ 不算。
 		{`{"code":11140,"msg":"The model provider is rate-limiting requests."}`, false},
 		{`{"code":1,"msg":"429 rate limit"}`, false},
@@ -648,5 +661,32 @@ func TestFetchModelsOverlaysV3ConfigCapabilities(t *testing.T) {
 	}
 	if got := strings.Join(mi.Efforts, ","); got != "low,high,max" {
 		t.Errorf("Efforts=%v want low,high,max", mi.Efforts)
+	}
+}
+
+func TestModelRateFrameTerminalPrecedence(t *testing.T) {
+	for _, c := range []struct {
+		body string
+		want ErrKind
+	}{
+		{`{"error":{"code":6000,"message":"切换其他模型; Offline user session not found"}}`, ErrSessionDead},
+		{`{"code":6000,"msg":"切换其他模型"}`, ErrSoftRate},
+		{`{"code":6004,"msg":"Offline user session not found"}`, ErrSessionDead},
+	} {
+		if got := FrameKind(c.body); got != c.want {
+			t.Fatalf("%s: got=%v want=%v", c.body, got, c.want)
+		}
+	}
+}
+
+func TestConfirmedModelLimitClassification(t *testing.T) {
+	body := `{"code":6000,"displayMsg":{"en":"Please switch to another model","zh":null}}`
+	for _, status := range []int{200, 400, 429, 503} {
+		if got := Classify(status, body); got != ErrSoftRate {
+			t.Fatalf("status%d got%v", status, got)
+		}
+	}
+	if IsModelRateLimit(`{"choices":[],"code":6000,"msg":"切换其他模型"}`) {
+		t.Fatal("accepted generated envelope")
 	}
 }

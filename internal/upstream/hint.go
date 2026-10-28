@@ -105,7 +105,8 @@ func FrameHintFunc(ctxFn func() HintContext) func(string) string {
 // （IsModelRateLimit 对帧 JSON 直接命中）优先；其余取帧内 error.message 走
 // Classify（请求级 400 口径）。判不出 → ErrNone（无 hint）。
 func FrameKind(payload string) ErrKind {
-	if k := Classify(http.StatusOK, payload); k == ErrModelBusy {
+	switch k := Classify(http.StatusOK, payload); k {
+	case ErrModelBusy, ErrHardCredit, ErrSessionDead, ErrAccountFault, ErrAccountRestricted:
 		return k
 	}
 	if IsModelRateLimit(payload) {
