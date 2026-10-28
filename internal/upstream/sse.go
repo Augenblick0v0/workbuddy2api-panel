@@ -23,7 +23,7 @@ import (
 var errEmptyStream = errors.New("upstream stream contained no valid data events")
 
 // errReasoningOnly 上游 200、流里有 reasoning 增量但始终没有任何正文/工具调用
-//（模型只产出了思考就被上游收尾，Hub #508）：对客户端是不可用回复，按失败
+// （模型只产出了思考就被上游收尾，Hub #508）：对客户端是不可用回复，按失败
 // 处理让调用方换号重开，不合成空 content 的假成功。
 var errReasoningOnly = errors.New("upstream stream carried only reasoning and no content or tool calls")
 
@@ -167,6 +167,9 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 				if json.Unmarshal([]byte(payload), &chunk) == nil {
 					// 有效事件计数：仅 JSON 解析成功的数据帧计入（解析失败沿用静默 continue）。
 					validEvents++
+					if Classify(http.StatusOK, payload) == ErrModelBusy {
+						return map[string]any{"usage": usage}, NewModelBusyError(http.StatusTooManyRequests, payload, nil)
+					}
 					if v, ok := chunk["id"].(string); ok && id == "" {
 						id = v
 					}
@@ -581,10 +584,18 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			// normalizeFrame 白名单——白名单会剥掉 error 字段，客户端就看不到上游
 			// code/msg/requestId。error.message 即上游原文（如 6004 限流、审核拦截），
 			// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
-			if _, hasErr := obj["error"]; hasErr {
+			_, hasErr := obj["error"]
+			rootBusy := !hasErr && Classify(http.StatusOK, payload) == ErrModelBusy
+			if hasErr || rootBusy {
 				// 旁路通知（账号处置用）：原始 payload 交给观察者，透传字节不变。
 				if o.onErrorFrame != nil {
 					o.onErrorFrame(payload)
+				}
+				if rootBusy {
+					obj["error"] = map[string]any{"type": "server_error", "code": "model_busy", "message": payload}
+					if raw, e := json.Marshal(obj); e == nil {
+						payload = string(raw)
+					}
 				}
 				if werr := writeRaw(payload); werr != nil {
 					return 0, werr

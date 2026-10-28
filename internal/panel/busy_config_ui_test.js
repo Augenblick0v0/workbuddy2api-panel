@@ -1,0 +1,20 @@
+'use strict';
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const path = require('node:path');
+const source = fs.readFileSync(path.join(__dirname,'app.js'),'utf8');
+test('busy retry config loads legacy default, preserves explicit zero, and serializes numeric changes',async()=>{
+ const field={type:'number',_value:'',get value(){return this._value},set value(v){this._value=String(v)}};
+ const nodes={cfgForm:{elements:{model_busy_max_retries:field}},cfgPath:{},cfgNote:{}};
+ let config={};
+ const ctx=vm.createContext({$:id=>nodes[id],api:async()=>({config}),loadProtocolDiagnostics(){},markDurationFields(){},toast(message){throw Error(message)}});
+ const form=source.slice(source.indexOf('const CFG_MAP ='),source.indexOf('/* Read-only, on demand;'));
+ const collect=source.slice(source.indexOf('function collectConfig()'),source.indexOf('/* Go 时长字段即时校验'));
+ vm.runInContext('let cfgLoaded;\n'+form+collect,ctx);
+ await ctx.loadConfig();assert.equal(field.value,'5');
+ config={server:{model_busy_max_retries:0}};await ctx.loadConfig();assert.equal(field.value,'0');
+ assert.equal(ctx.collectConfig().server.model_busy_max_retries,0);
+ field.value='9';assert.equal(ctx.collectConfig().server.model_busy_max_retries,9);
+});

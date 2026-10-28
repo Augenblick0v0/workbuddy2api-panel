@@ -51,6 +51,8 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		// 账号级 WAF 403 与 IP 级 fail-fast 同 hint：两者对客户端的动作一致
 		// （等待窗口过去再试，换号/立刻重试无意义）。
 		return "upstream WAF blocked the gateway; retry after the block window"
+	case ErrModelBusy:
+		return "model is temporarily busy; retry after the suggested delay; account health is unchanged"
 	case ErrSoftRate:
 		return "rate limited by upstream; retry after reset"
 	case ErrAccountFault:
@@ -103,6 +105,9 @@ func FrameHintFunc(ctxFn func() HintContext) func(string) string {
 // （IsModelRateLimit 对帧 JSON 直接命中）优先；其余取帧内 error.message 走
 // Classify（请求级 400 口径）。判不出 → ErrNone（无 hint）。
 func FrameKind(payload string) ErrKind {
+	if k := Classify(http.StatusOK, payload); k == ErrModelBusy {
+		return k
+	}
 	if IsModelRateLimit(payload) {
 		return ErrSoftRate
 	}

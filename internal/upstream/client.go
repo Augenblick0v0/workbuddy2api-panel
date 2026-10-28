@@ -30,27 +30,30 @@ import (
 type ErrKind int
 
 const (
-	ErrNone           ErrKind = iota // 成功
-	ErrHardCredit                    // 余额不足（402 或 body 关键词）→ 长冷却
-	ErrSoftRate                      // 429 软限流 → 短冷却
-	ErrSessionDead                   // 401 + 12153 offline session 失效 → 禁用
-	ErrNotFound                      // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
-	ErrServer                        // 5xx 上游故障
-	ErrContentBlocked                // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
-	ErrBadParams                     // 请求体解析失败（400 + Unmarshal chat params failed / 11101）→ 请求级错误：不罚号、不轮转，末端 400 透传原文
-	ErrAccountFault                  // 账号级授权/配额故障（11140 request illegal / 14017 trial not activated）→ 冷却轮换，不无限重试
-	ErrModelBlocked                  // 11102「该后端无此模型」→ (账号,模型) 负缓存避让，切模型/切账号
-	ErrWafBlock                      // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避
-	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
-	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
-	ErrAccountRestricted             // 403/11140 风控限制（unusual activity 国际形态）→ 长冷却 + 止损停轮转 + 波形整池暂停（同设备指纹换号会连坐）
-	ErrClient                        // 其他 4xx / 业务错误
+	ErrNone              ErrKind = iota // 成功
+	ErrHardCredit                       // 余额不足（402 或 body 关键词）→ 长冷却
+	ErrSoftRate                         // 429 软限流 → 短冷却
+	ErrSessionDead                      // 401 + 12153 offline session 失效 → 禁用
+	ErrNotFound                         // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
+	ErrServer                           // 5xx 上游故障
+	ErrContentBlocked                   // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
+	ErrBadParams                        // 请求体解析失败（400 + Unmarshal chat params failed / 11101）→ 请求级错误：不罚号、不轮转，末端 400 透传原文
+	ErrAccountFault                     // 账号级授权/配额故障（11140 request illegal / 14017 trial not activated）→ 冷却轮换，不无限重试
+	ErrModelBlocked                     // 11102「该后端无此模型」→ (账号,模型) 负缓存避让，切模型/切账号
+	ErrWafBlock                         // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避
+	ErrPromptTooLong                    // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
+	ErrImageInvalid                     // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
+	ErrAccountRestricted                // 403/11140 风控限制（unusual activity 国际形态）→ 长冷却 + 止损停轮转 + 波形整池暂停（同设备指纹换号会连坐）
+	ErrModelBusy                        // 模型队列拥堵：请求级等待，不处罚账号
+	ErrClient                           // 其他 4xx / 业务错误
 )
 
 func (k ErrKind) String() string {
 	switch k {
 	case ErrHardCredit:
 		return "hard_credit"
+	case ErrModelBusy:
+		return "model_busy"
 	case ErrSoftRate:
 		return "soft_rate"
 	case ErrSessionDead:
@@ -91,8 +94,10 @@ type Error struct {
 	// x-ratelimit-reset 头解析，见 ParseRetryAfter）。零值 = 上游未明示，
 	// 冷却时长回落调用方计算值。挂载点选在 Error 信封：Kind 决定「罚不罚」，
 	// RetryAfter 决定「罚多久」，同为上游响应的一等公民。
-	RetryAfter time.Duration
-	RouteKey   string // actual request route, not a later binding lookup
+	RetryAfter       time.Duration
+	BusyRetryAllowed *bool
+	RetryAfterSource string
+	RouteKey         string // actual request route, not a later binding lookup
 }
 
 func (e *Error) Error() string {
@@ -504,6 +509,7 @@ func ParseRateReset(body string) (time.Time, bool) {
 //     拦截形态。判在通用 4xx 兜底**之前**：此前该形态落 ErrClient → 只换号不罚 →
 //     连环 403。带业务信封的 403 已被上方各层捕获，走不到本层。
 //  11. 内容策略/参数错误/其他 4xx —— 通用兜底。
+//
 // looksLikeHTMLPage 判定 body 是否 HTML 页面形态（trim 后以 "<" 开头，含
 // "<!doctype"）。用于把「中间层 HTML 错误页」与 WorkBuddy JSON 业务信封区分开。
 func looksLikeHTMLPage(body string) bool {
@@ -567,6 +573,9 @@ func Classify(status int, body string) ErrKind {
 	// 信号：上游既然给了 429，就按限流语义处理（宁可短冷却自愈，不可长冷却弃号）；
 	// 真正的余额耗尽由 402（上层）或 14018（上层）捕获，非 429 状态码的 quota
 	// 措辞仍走下方 hardMarkers（历史语义不变）。
+	if IsModelBusy(status, body) {
+		return ErrModelBusy
+	}
 	if status == http.StatusTooManyRequests {
 		return ErrSoftRate
 	}
@@ -871,7 +880,7 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []b
 // cliChatBody 官方 CLI 的 chat 请求体形态：剔除 metadata / conversation_id /
 // previous_response_id（Responses API 与客户端自定义字段），注入 cache_retention
 // =long（官方 resolveCacheRetention 默认），重排 JSON.stringify 紧凑形态后 gzip
-//（productFeatures.RequestBodyGzip）。解析失败时保持原样（不因变换失败拦请求）。
+// （productFeatures.RequestBodyGzip）。解析失败时保持原样（不因变换失败拦请求）。
 func cliChatBody(body []byte) []byte {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(body, &obj); err == nil && obj != nil {
@@ -1000,7 +1009,11 @@ const refreshTokenExpiresInMax = 10 * 365 * 24 * time.Hour
 //     独占 a.mu，阻塞同账号的 SaveAtomic / 其他刷新（issue:持锁 120s I/O）。
 //   - 写回前重新校验快照一致性：若锁外期间另一 goroutine 已完成刷新（refreshToken
 //     已变），本次结果直接采用（新 token 已生效），不再重复写回。
-func (c *Client) RefreshToken(a *auth.Auth) (retErr error) {
+func (c *Client) RefreshToken(a *auth.Auth) error {
+	return c.RefreshTokenContext(context.Background(), a)
+}
+
+func (c *Client) RefreshTokenContext(parent context.Context, a *auth.Auth) (retErr error) {
 	// 第 1 段（锁内）：读快照。
 	a.Lock()
 	rtSnapshot := a.RefreshToken
@@ -1024,7 +1037,7 @@ func (c *Client) RefreshToken(a *auth.Auth) (retErr error) {
 	}
 
 	endpoint := c.chatBase(a) + "/v2/plugin/auth/token/refresh"
-	ctx, cancel := context.WithTimeout(context.Background(), refreshIOTimeout)
+	ctx, cancel := context.WithTimeout(parent, refreshIOTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 	if err != nil {
@@ -1178,6 +1191,11 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			if kind == ErrNone {
 				return nil, resp.StatusCode, raw, nil
 			}
+			if kind == ErrModelBusy {
+				ue := NewModelBusyError(resp.StatusCode, string(raw), resp.Header)
+				ue.RouteKey = responseRouteKey(resp)
+				return nil, resp.StatusCode, raw, ue
+			}
 			ue := &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200), RouteKey: responseRouteKey(resp)}
 			if d, ok := ParseRetryAfter(resp.Header); ok {
 				ue.RetryAfter = d
@@ -1187,7 +1205,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		// 成功分支：cancel 所有权交给 monitorBody（其 Close 会 cancel）；
 		// IdleTimeout<=0 时 monitorBody 原样返回底流、无人调 cancel——可接受：
 		// 取消传播由 http.Transport 在 body Close / 父 ctx 取消时处理，连接正常清理。
-		return monitorBody(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
+		return &chatReadCloser{ReadCloser: monitorBody(resp.Body, c.IdleTimeout, cancel), headers: resp.Header.Clone()}, resp.StatusCode, nil, nil
 	}
 	panic("unreachable: chatPaths is never empty") // for range 空集时编译器仍要求兜底 return；chatPaths 恒非空（构造保证），永不触达
 }

@@ -11,7 +11,8 @@
     "wb_probe_global": ""
   },
   "server": {
-    "read_timeout": "300s"
+    "read_timeout": "300s",
+    "model_busy_max_retries": 5
   },
   "panel": {
     "package_detail_limit": 5

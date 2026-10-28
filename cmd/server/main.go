@@ -32,7 +32,7 @@ import (
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-const appVersion = "1.15.1"
+const appVersion = "1.15.2"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -271,6 +271,7 @@ func main() {
 	live := livecfg.New(livecfg.Snapshot{
 		APIKey:               cfg.APIKey,
 		SoftCooldown:         cfg.SoftRateDur,
+		ModelBusyMaxRetries:  &cfg.Server.ModelBusyMaxRetries,
 		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:     cfg.Logging.RequestClientInfo,
 	})
@@ -329,20 +330,21 @@ func main() {
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
 	h := server.NewHandler(server.Config{
-		Pool:            p,
-		Upstream:        up,
-		ModelsAllowlist: cfg.Upstream.ModelsAllowlist,
-		APIKey:          cfg.APIKey,
-		Session:         sessRouter,
-		StickyCount:     sessCount,
-		RedisMode:       redisMode,
-		SoftCooldown:    cfg.SoftRateDur,
-		Panel:           pn,
-		Live:            live,
-		Usage:           rec,
-		RequestLog:      requestLog,
-		PromptMode:      cfg.Prompt.Mode,
-		PromptText:      cfg.PromptText,
+		Pool:                p,
+		Upstream:            up,
+		ModelsAllowlist:     cfg.Upstream.ModelsAllowlist,
+		APIKey:              cfg.APIKey,
+		Session:             sessRouter,
+		StickyCount:         sessCount,
+		RedisMode:           redisMode,
+		SoftCooldown:        cfg.SoftRateDur,
+		ModelBusyMaxRetries: &cfg.Server.ModelBusyMaxRetries,
+		Panel:               pn,
+		Live:                live,
+		Usage:               rec,
+		RequestLog:          requestLog,
+		PromptMode:          cfg.Prompt.Mode,
+		PromptText:          cfg.PromptText,
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
@@ -527,6 +529,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	live.Store(livecfg.Snapshot{
 		APIKey:               newCfg.APIKey,
 		SoftCooldown:         newCfg.SoftRateDur,
+		ModelBusyMaxRetries:  &newCfg.Server.ModelBusyMaxRetries,
 		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:     newCfg.Logging.RequestClientInfo,
 	})

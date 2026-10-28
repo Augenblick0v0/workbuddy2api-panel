@@ -65,7 +65,8 @@ type Config struct {
 		// 反代链转发时上传可超过旧固定值 60s，被掐后客户端拿到
 		// 400 "read body: ... i/o timeout"。缺省 "300s"；"0" = 不限制
 		//（慢速 body 可无限占用连接，自担风险）；改动需重启进程。
-		ReadTimeout string `json:"read_timeout"` // "300s"；"0" = 不限制
+		ModelBusyMaxRetries int    `json:"model_busy_max_retries"` // 0–100，默认5；0关闭额外重试
+		ReadTimeout         string `json:"read_timeout"`           // "300s"；"0" = 不限制
 	} `json:"server"`
 
 	Cooldown struct {
@@ -104,9 +105,9 @@ type Config struct {
 		// 探针消耗真实配额（每条线每周期 1 次），缺省 false（显式开启）。
 		QuotaScanEnabled bool `json:"quota_scan_enabled"`
 		// QuotaScanMinutes 扫描周期分钟数；<=0 回落 15。
-		QuotaScanMinutes int `json:"quota_scan_minutes"`
-		BlackcatEnabled  bool `json:"blackcat_enabled"`  // 缺省 true；false = 关夜猫子
-		GrowthEnabled    bool `json:"growth_enabled"`    // 缺省 true；false = 关成长任务自动排程
+		QuotaScanMinutes int  `json:"quota_scan_minutes"`
+		BlackcatEnabled  bool `json:"blackcat_enabled"` // 缺省 true；false = 关夜猫子
+		GrowthEnabled    bool `json:"growth_enabled"`   // 缺省 true；false = 关成长任务自动排程
 
 		// IncludeDisabledInTasks 让「保号类」定时任务（签到 / 活跃上报 / token 保活 /
 		// 余额刷新）对**已禁用（disabled）**的账号也执行。
@@ -285,6 +286,7 @@ func Default() *Config {
 	}
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
+	c.Server.ModelBusyMaxRetries = 5
 	c.Server.ReadTimeout = "300s"
 	c.Panel.PackageDetailLimit = 5
 	c.Logging.RequestArchiveEnabled = true
@@ -504,6 +506,9 @@ func applyEnv(c *Config) {
 }
 
 func (c *Config) normalize() error {
+	if c.Server.ModelBusyMaxRetries < 0 || c.Server.ModelBusyMaxRetries > 100 {
+		return fmt.Errorf("server.model_busy_max_retries: 必须是0–100的整数")
+	}
 	for _, cidr := range c.Egress.AllowedProxyCIDRs {
 		if _, _, err := net.ParseCIDR(cidr); err != nil {
 			return fmt.Errorf("egress.allowed_proxy_cidrs: invalid CIDR")

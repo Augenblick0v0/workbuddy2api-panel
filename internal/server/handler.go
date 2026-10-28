@@ -34,10 +34,11 @@ import (
 
 // Config handler 依赖。
 type Config struct {
-	Pool      *pool.Pool
-	Upstream  *upstream.Client
-	APIKey    string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
-	MaxRotate int    // 单请求最多换号次数，默认 3
+	Pool                *pool.Pool
+	Upstream            *upstream.Client
+	APIKey              string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
+	ModelBusyMaxRetries *int   // nil = default5; 0 disables busy retries
+	MaxRotate           int    // 单请求最多换号次数，默认 3
 	// ModelsAllowlist 模型白名单（config upstream.models_allowlist）：非空时
 	// /v1/models 只列名单内模型，chat 请求名单外模型直接 403（单 key 部署的
 	// 「按 key 限制可用模型」语义，Hub 多 key 特性的单 key 子集）。
@@ -90,9 +91,10 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		return h.cfg.Live.Load()
 	}
 	return livecfg.Snapshot{
-		APIKey:           h.cfg.APIKey,
-		SoftCooldown:     h.cfg.SoftCooldown,
-		RecordClientInfo: h.cfg.RecordClientInfo,
+		APIKey:              h.cfg.APIKey,
+		SoftCooldown:        h.cfg.SoftCooldown,
+		RecordClientInfo:    h.cfg.RecordClientInfo,
+		ModelBusyMaxRetries: h.cfg.ModelBusyMaxRetries,
 	}
 }
 
@@ -129,7 +131,9 @@ type Handler struct {
 	wafRoutes routeWAFGates
 	// restricted 风控 11140 连坐保护状态机（restricted.go）：单号命中即停轮转；
 	// 短窗多号波形 → 整域池暂停。进程内状态、重启清零。
-	restricted restrictedGate
+	restricted         restrictedGate
+	busy               *busyCoordinator
+	busyPolicyOverride *BusyRetryPolicy // deterministic timings in package tests
 }
 
 // NewHandler 构建 handler。
@@ -146,7 +150,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), busy: newBusyCoordinator()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	// /u/{ref}/v1/... 按账号定址路由（Hub #455）：调试/运维把请求钉在指定账号上，
@@ -799,10 +803,96 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
-	for i := 0; i < h.cfg.MaxRotate; i++ {
+	policy := h.busyPolicy() // stable retry count for this logical request
+	busyKey := realm + "\x1f" + bareModel
+	var budget *busyBudget
+	var permit *busyPermit
+	busyUID := ""
+	busyRetries, chatAttempts := 0, 0
+	var busyErr *upstream.Error
+	var busyHintUntil time.Time
+	defer func() { permit.release(false); budget.close() }()
+	attemptContext := func() context.Context {
+		if budget != nil {
+			return budget.ctx
+		}
+		return r.Context()
+	}
+	finishBusy := func(reason string) {
+		d := h.busy.remaining(busyKey)
+		msg := ""
+		if busyErr != nil {
+			msg = busyErr.Msg
+			if remaining := time.Until(busyHintUntil); remaining > d {
+				d = remaining
+			}
+		}
+		if d <= 0 {
+			d = policy.BaseDelay
+		}
+		writeModelBusy(w, msg, reason, d)
+		st.status = http.StatusTooManyRequests
+		st.outcome = reqlog.OutcomeHTTPError
+		log.Printf("INFO: [server] model_busy request=%s model=%s realm=%s outcome=stopped attempts=%d busy_retries=%d queue_depth=%d retry_after=%s", chatMeta.ConversationRequestID, bareModel, realm, chatAttempts, busyRetries, h.busy.depth(busyKey), d)
+	}
+	stopCancelledRefresh := func() bool {
+		if attemptContext().Err() == nil {
+			return false
+		}
+		releaseHeld()
+		if budget != nil {
+			finishBusy("busy retry budget expired or request cancelled during token refresh")
+		} else {
+			st.status = 499
+			st.outcome = reqlog.OutcomeInterrupted
+		}
+		return true
+	}
+	for i := 0; i < h.cfg.MaxRotate && chatAttempts < policy.MaxChatAttempts; i++ {
+		permit.release(false)
+		permit = nil
+		budget.resume()
+		if budget != nil && budget.ctx.Err() != nil {
+			finishBusy("busy retry budget expired or request cancelled")
+			return
+		}
+		busyActive := h.busy.active(busyKey)
+		if busyUID != "" || busyActive {
+			if budget == nil {
+				budget = newBusyBudget(r.Context(), policy.Budget)
+			}
+			if budget.ctx.Err() != nil {
+				finishBusy("busy retry budget expired or request cancelled")
+				return
+			}
+			if d := h.busy.remaining(busyKey); d > time.Until(budget.deadline) {
+				finishBusy("upstream wait exceeds the remaining busy retry budget")
+				return
+			}
+			var err error
+			waitStarted := time.Now()
+			permit, err = h.busy.acquire(budget.ctx, busyKey, policy)
+			log.Printf("INFO: [server] model_busy request=%s model=%s realm=%s wait_ms=%d queue_depth=%d outcome=queue_exit", chatMeta.ConversationRequestID, bareModel, realm, time.Since(waitStarted).Milliseconds(), h.busy.depth(busyKey))
+			if err != nil {
+				finishBusy(err.Error())
+				return
+			}
+		}
+		if r.Context().Err() != nil {
+			return
+		}
+
 		// 选号：/u/{ref} 定址 > 粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满）> 普通轮换。
 		var acct *auth.Auth
-		if pinnedUID != "" {
+		if busyUID != "" {
+			acct = h.cfg.Pool.PickByUIDForModel(busyUID, bareModel)
+			if acct == nil || (realm != "" && acct.Realm() != realm) {
+				writeOpenAIError(w, 503, "account_unavailable", "busy retry account is no longer available")
+				st.status = 503
+				st.outcome = reqlog.OutcomeHTTPError
+				return
+			}
+		} else if pinnedUID != "" {
 			// 定址模式：只钉该号；不可用（冷却/禁用/该模型限流/在途满）立即说明，不换号。
 			acct = h.cfg.Pool.PickByUIDForModel(pinnedUID, bareModel)
 			if acct == nil {
@@ -863,12 +953,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。
 		if !h.cfg.Pool.AcquireForModel(acct.UID, bareModel) {
+			if busyUID != "" {
+				writeOpenAIError(w, 503, "account_unavailable", "busy retry account concurrency limit reached")
+				st.status = 503
+				st.outcome = reqlog.OutcomeHTTPError
+				return
+			}
 			// 若被抢的正是粘性号，立即解绑并回落普通轮换，避免下一轮仍撞同一个
 			// 满载粘性号再浪费一次 PickByUID 往返（语义与 fail()/PickByUID-nil 的解绑一致）。
 			if stickyUID != "" && acct.UID == stickyUID {
 				unbindSticky()
 			}
-			if !rotateBackoff(i, r.Context()) {
+			if !rotateBackoff(i, attemptContext()) {
 				// 客户端已断连：换号重试无意义，终止轮转走末端错误透传。
 				break
 			}
@@ -878,8 +974,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		// token 临近过期 → 先 refresh（失败冷却换号）
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
-			if err := h.cfg.Upstream.RefreshToken(acct); err != nil {
+			if err := h.cfg.Upstream.RefreshTokenContext(attemptContext(), acct); err != nil {
 				lastErr = err
+				if stopCancelledRefresh() {
+					return
+				}
 				if stopEgress(w, err) {
 					releaseHeld()
 					st.status = egress.HTTPStatus(err)
@@ -892,7 +991,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					h.cfg.Pool.NoteError(acct.UID)
 				}
 				fail(acct.UID)
-				if !rotateBackoff(i, r.Context()) {
+				if !rotateBackoff(i, attemptContext()) {
 					break // ctx 取消：终止轮转（refresh 失败换号退避）
 				}
 				continue
@@ -905,7 +1004,90 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		// 客户端 IP 按请求传递（PassthroughIP 开启时注入；消除共享字段竞态）。
 		attemptStarted := time.Now()
-		rc, status, respBody, terr := h.cfg.Upstream.ChatStreamContext(r.Context(), acct, body, clientIP, chatMeta)
+		sendCtx := r.Context()
+		if budget != nil {
+			sendCtx = budget.ctx
+		}
+		chatAttempts++
+		rc, status, respBody, terr := h.cfg.Upstream.ChatStreamContext(sendCtx, acct, body, clientIP, chatMeta)
+		responseHeaders := upstream.BusyRetryHeaders(rc)
+		// Common stream/non-stream preflight, before any downstream output. Prefix is
+		// replayed byte-for-byte; a generated frame disables automatic busy replay.
+		var prefix []byte
+		frames := 0
+		var perr error
+		if terr == nil && status < 400 && rc != nil {
+			prefix, frames, perr = upstream.PeekFirstFrame(rc)
+			if ue := upstream.BusyFirstEvent(prefix, upstream.BusyRetryHeaders(rc)); ue != nil {
+				rc.Close()
+				rc = nil
+				status = 429
+				respBody = []byte(ue.Msg)
+				terr = ue
+			} else {
+				if upstream.AcceptedChatEvent(prefix) {
+					budget.accept()
+				}
+				rc = &upstream.PrefixedReadCloser{Prefix: bytes.NewReader(prefix), Rest: rc}
+				if budget != nil {
+					currentPermit := permit
+					rc = upstream.ObserveAcceptedChatEvent(rc, func() { budget.accept(); currentPermit.release(true) })
+				}
+			}
+		}
+		var busyResponse *upstream.Error
+		if errors.As(terr, &busyResponse) && busyResponse.Kind == upstream.ErrModelBusy {
+			busyErr = busyResponse
+			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
+			releaseHeld() // deliberately preserve sticky binding and account state
+			if budget == nil {
+				budget = newBusyBudget(r.Context(), policy.Budget)
+			}
+			delay := busyResponse.RetryAfter
+			if delay <= 0 {
+				delay = policy.BaseDelay
+			}
+			jitter := busyJitter(policy.JitterMax)
+			if delay > time.Duration(1<<63-1)-jitter {
+				delay = time.Duration(1<<63 - 1)
+			} else {
+				delay += jitter
+			}
+			busyHintUntil = time.Now().Add(delay)
+			noteErr := h.busy.note(busyKey, delay, policy)
+			permit.release(false)
+			permit = nil
+			log.Printf("INFO: [server] model_busy request=%s attempt=%d busy_retry=%d realm=%s model=%s acct=%s delay=%s source=%s code=%s queue_depth=%d outcome=busy", chatMeta.ConversationRequestID, chatAttempts, busyRetries, acct.Realm(), bareModel, acct.UID, delay, busyResponse.RetryAfterSource, upstream.ModelBusyCode(busyResponse.Msg), h.busy.depth(busyKey))
+			if noteErr != nil {
+				finishBusy(noteErr.Error())
+				return
+			}
+			if (busyResponse.BusyRetryAllowed != nil && !*busyResponse.BusyRetryAllowed) || busyRetries >= policy.MaxRetries || chatAttempts >= policy.MaxChatAttempts {
+				finishBusy("busy retry limit reached or upstream disallowed retry")
+				return
+			}
+			if delay > time.Until(budget.deadline) {
+				finishBusy("upstream wait exceeds the remaining busy retry budget")
+				return
+			}
+			busyRetries++
+			busyUID = acct.UID
+			i-- // extra busy attempts do not consume ordinary rotation slots
+			continue
+		}
+		if terr != nil || status >= 400 || upstream.AcceptedChatEvent(prefix) {
+			permit.release(terr == nil && status < 400 && upstream.AcceptedChatEvent(prefix))
+			permit = nil
+		}
+		busyUID = "" // non-busy errors use the existing policy and rotation limits
+		if budget != nil && budget.ctx.Err() != nil {
+			if rc != nil {
+				rc.Close()
+			}
+			releaseHeld()
+			finishBusy("busy retry budget expired or request cancelled")
+			return
+		}
 		// 分类信封一次成型：upstream 已在错误路径返回 *upstream.Error（Kind +
 		// Retry-After 头解析）。传输层错误（非 *Error）走抖动换号分支；防御分支
 		// （terr 为 nil 但 status>=400，如 ErrNone 兜底）回落本地 Classify，双保险。
@@ -958,7 +1140,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			lastErr = terr
 			h.cfg.Pool.NoteFailures(acct.UID)
 			fail(acct.UID)
-			if !rotateBackoff(i, r.Context()) {
+			if !rotateBackoff(i, attemptContext()) {
 				break // ctx 取消：终止轮转（传输层错误换号退避）
 			}
 			continue
@@ -1059,16 +1241,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 只是 token 过期的健康号轮转一遍）。每账号每请求最多刷一次，防 401 循环。
 			if status == http.StatusUnauthorized && kind == upstream.ErrClient && !refreshed401[acct.UID] {
 				refreshed401[acct.UID] = true
-				if rerr := h.cfg.Upstream.RefreshToken(acct); rerr == nil {
+				if rerr := h.cfg.Upstream.RefreshTokenContext(attemptContext(), acct); rerr == nil {
+					if stopCancelledRefresh() {
+						return
+					}
 					log.Printf("INFO: [server] 401 -> token refreshed, retrying acct=%s",
 						logfmt.Label(acct.UID, acct.Nickname))
 					delete(tried, acct.UID) // 同号拿新 token 再来一次（不占 tried 名额）
 					fail(acct.UID)
-					if !rotateBackoff(i, r.Context()) {
+					if !rotateBackoff(i, attemptContext()) {
 						break // ctx 取消：终止轮转（401 刷新重试）
 					}
 					continue
 				}
+			}
+			if stopCancelledRefresh() {
+				return
 			}
 			// 风控 11140（unusual activity 形态）止损（Hub #422 复盘红线）：**立即终止
 			// 轮转**——同设备指纹换号会连坐，继续换号等于把整池账号逐个送上去。账号
@@ -1090,7 +1278,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
-			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
+			if stopCancelledRefresh() {
+				return
+			}
+			lastCopy := *uerr
+			lastCopy.Msg = string(respBody)
+			lastErr = &lastCopy
 			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 			fail(acct.UID)
 			// WAF IP 级 fail-fast（优先于 rotateBackoff 退避——IP 级拦截时退避无意义）：
@@ -1113,7 +1306,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 			}
-			if !rotateBackoff(i, r.Context()) {
+			if !rotateBackoff(i, attemptContext()) {
 				break // ctx 取消：终止轮转（分类错误换号退避）
 			}
 			continue
@@ -1127,8 +1320,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// data: 事件。上游 200 后未发任何事件即断（首字节前断流）→ 此时尚未
 			// 写任何响应字节，可安全换号重开一次，而不是给客户端一条必然的空流
 			// 错误帧。窥探到的字节经 PrefixedReadCloser 与剩余流拼回，零丢失。
-			prefix, frames, perr := upstream.PeekFirstFrame(rc)
 			if perr != nil && frames == 0 {
+				rc.Close()
 				recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 				st.status = http.StatusServiceUnavailable
 				lastErr = fmt.Errorf("upstream stream broke before first frame: %w", perr)
@@ -1136,12 +1329,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					logfmt.Label(acct.UID, acct.Nickname), perr)
 				h.cfg.Pool.NoteFailures(acct.UID)
 				fail(acct.UID)
-				if !rotateBackoff(i, r.Context()) {
+				if !rotateBackoff(i, attemptContext()) {
 					break // ctx 取消：终止轮转（首字节前断流重开）
 				}
 				continue
 			}
-			rc = &upstream.PrefixedReadCloser{Prefix: bytes.NewReader(prefix), Rest: rc}
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
 			st.status = http.StatusOK
 			stats := newChatStatsReaderSince(rc, st.start)
@@ -1154,6 +1346,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				return h.hintContext(bareModel, reqHasImage)
 			}), upstream.WithErrorFrameObserver(func(payload string) { errFrame = payload }))
 			switch {
+			case budget != nil && budget.ctx.Err() != nil:
+				st.status = 429
+				st.outcome = reqlog.OutcomeStreamError
 			case upstream.IsEmptyStreamError(sErr):
 				// 上游 200 但空流（0 有效帧）：StreamHint 已写 error 帧 + [DONE]
 				// 兜底（HTTP 头已发出只能 200），但这是上游缺陷不是成功——日志/
@@ -1228,6 +1423,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		resp, err := upstream.Aggregate(rc)
 		rc.Close()
 		if err != nil {
+			var lateBusy *upstream.Error
+			if errors.As(err, &lateBusy) && lateBusy.Kind == upstream.ErrModelBusy {
+				lateBusy = upstream.NewModelBusyError(lateBusy.Status, lateBusy.Msg, responseHeaders)
+				credit, _, hasCredit := usageCreditTotal(resp)
+				recordAttempt(acct.UID, usageDeltaFromResponse(resp), credit, hasCredit, attemptStarted, 0)
+				releaseHeld()
+				d := lateBusy.RetryAfter
+				if d <= 0 {
+					d = policy.BaseDelay
+				}
+				writeModelBusy(w, lateBusy.Msg, "upstream reported model busy after the first event; generation was not replayed", d)
+				st.status = 429
+				st.outcome = reqlog.OutcomeHTTPError
+				return
+			}
+			if budget != nil && budget.ctx.Err() != nil {
+				releaseHeld()
+				finishBusy("busy retry budget expired or request cancelled")
+				return
+			}
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 			// 空流 / reasoning-only（上游 200 但没有可用正文，Hub #522/#508）：
 			// 客户端尚未看到任何输出，按可轮转错误换号重开，而非直接 502——
@@ -1238,7 +1453,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				log.Printf("WARN: [server] non-stream acct=%s: %v (rotating)", logfmt.Label(acct.UID, acct.Nickname), err)
 				h.cfg.Pool.NoteFailures(acct.UID)
 				fail(acct.UID)
-				if !rotateBackoff(i, r.Context()) {
+				if !rotateBackoff(i, attemptContext()) {
 					break // ctx 取消：终止轮转（空流/reasoning-only 换号）
 				}
 				continue
@@ -1296,6 +1511,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定；本地调度类
 	// 错误（无上游原文）固定 no_healthy_account hint。
 	hint := upstream.NoHealthyAccountHint()
+	if budget != nil && budget.ctx.Err() != nil {
+		finishBusy("busy retry budget expired or request cancelled")
+		return
+	}
 	// upstreamMsgPassed 记录 error.message 是否已被上游原文占据：模型级阻塞分支
 	// 据此决定要不要覆盖 msg（上游原文优先，含 requestId）。
 	upstreamMsgPassed := false
@@ -1448,7 +1667,7 @@ var errUpstreamTimeout = errors.New("upstream timeout")
 // 问题，换号注定白换（同一份请求撞同一个慢上游），必须止损：不轮转、不罚号。
 // 三态判定见传输层错误分支的注释。
 // isCertVerificationFailure 判定传输错误是否为 TLS 证书校验失败族
-//（tls.CertificateVerificationError / x509 的 UnknownAuthority / Hostname /
+// （tls.CertificateVerificationError / x509 的 UnknownAuthority / Hostname /
 // ConstraintViolation）。这类错误是确定性的（同链路换号必复现），调用方应终止
 // 轮转而非继续换号。
 func isCertVerificationFailure(err error) bool {
@@ -1520,6 +1739,8 @@ func isUpstreamTimeout(err error, clientGone bool) bool {
 // 零值/防御路径下为 nil，冷却时长回落既有计算。
 func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, model string, uerr *upstream.Error) {
 	switch kind {
+	case upstream.ErrModelBusy:
+		return // queue congestion never changes account health
 	case upstream.ErrHardCredit:
 		// 402 + 余额关键词即积分耗尽：同步冷却到次日 04:00（签到任务 09/21 点恢复），
 		// 不需要异步核查（冗余）。立即换号。
