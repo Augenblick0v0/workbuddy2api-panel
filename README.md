@@ -731,7 +731,7 @@ http://127.0.0.1:7863/panel/
 | `billing/meter/daily-checkin` | POST | 每日签到 |
 | `billing/meter/get-user-resource` | POST | 余额查询 |
 | `report` | POST | 对话活跃上报（`chat_request_send` 事件数组，必须含 `userId`；点亮连登 / 解锁领养） |
-| `plugin/auth/state?platform=CLI` | POST | OAuth 取授权 URL |
+| `plugin/auth/state?platform=workbuddy` | POST | OAuth 取授权 URL（国际版用 `platform=workbuddy-ai`；UA `WorkBuddy/5.9.3`，认证 URL 追加 `version` + `loginSessionId`） |
 | `plugin/auth/token?state=` | GET | OAuth 轮询取 token |
 | `plugin/login/account?state=` | GET | OAuth 取账号信息 |
 | `activity/growth/buddy/agreement` | POST | 猫猫旅行：同意协议（幂等） |
@@ -946,6 +946,14 @@ sudo chown -R 10001:10001 ./auths ./data ./config.json
 - 再分发（源码或二进制形式）时，请保留原仓库的 MIT 版权声明与许可声明（如在 NOTICE 或 README 中注明原始出处 `https://github.com/Sliverkiss/workbuddy2api`）
 - 本项目不授予任何上游（CodeBuddy / 腾讯）接口或服务的权利；使用者仍需自行遵守上游服务条款
 
+
+### v1.15.4 修复面板「上游拒绝授权」：登录身份对齐 WorkBuddy 桌面端
+
+面板内 OAuth 添加账号此前走 CodeBuddy CLI 身份（`User-Agent: CLI/2.63.2 CodeBuddy/2.63.2`、`platform=CLI`、额外 `Origin`/`Referer`），在 CN 会被上游派到 CodeBuddy CLI 登录页，拿回的 state 不属于 WorkBuddy 桌面身份；更致命的是 token 轮询把「用户还没登录」当成业务错误——上游未完成时回 `HTTP 200 {"code":11217,"msg":"login ing..."}`，旧判定只认不带省略号的 `login ing` 白名单文案，于是用户刚点「登录」就立刻看到 **上游拒绝授权**。
+
+现在整条设备授权链路按官方桌面端实现（与可用的参照实现逐头一致）：`User-Agent: WorkBuddy/5.9.3`、`platform=workbuddy`（国际版 `workbuddy-ai`）、state 阶段 `X-No-Authorization`/`X-No-User-Id`/`X-No-Enterprise-Id`/`X-No-Department-Info`、认证 URL 追加 `version=5.9.3` 与 `loginSessionId=<32hex>`（CN 登录页据此展示企业微信登录）、account 阶段带 `X-Domain`；三端点不再发浏览器专用的 `Origin`/`Referer`/`X-Requested-With`。
+
+等待判定改为**按业务码**：token 阶段 `11217`、account 阶段 `12151` 一律继续等（文案只作旧响应兜底），account 阶段等待不再判死会话；代理（`proxy_slot_id` 绑定）路径与原有 egress 校验、CAS 绑定、热加载流程不变。`cmd/login`（`login.sh` 后端）同步修正。
 
 ### v1.15.3 模型用量限流隔离
 

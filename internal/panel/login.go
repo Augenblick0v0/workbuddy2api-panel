@@ -6,12 +6,18 @@
 //	  完成后取 uid/nickname、凭证落盘 auths/workbuddy-<uid>.json、热加载进池
 //	  （pool.Add + Revive），并顺带签到 + 余额刷新 —— 免重启加载新账号。
 //
-// 无 PKCE（workbuddy 设备流由服务端签发 state），请求头与上游端点与 cmd/login 保持一致。
+// 无 PKCE（workbuddy 设备流由服务端签发 state）。请求身份对齐官方桌面端
+//（User-Agent: WorkBuddy/<app>、state 端点 platform=workbuddy|workbuddy-ai、
+// X-No-* 声明、authUrl 带 version+loginSessionId），三端点只发
+// Content-Type/Accept/User-Agent —— 与可用参照实现（magpie 的
+// opencode-workbuddy-auth 插件）逐头一致。
 package panel
 
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -34,39 +40,115 @@ import (
 const (
 	upstreamBaseCN      = "https://copilot.tencent.com"
 	upstreamBaseGlobal  = "https://www.workbuddy.ai"
-	clientUA            = "CLI/2.63.2 CodeBuddy/2.63.2"
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
+
+	// 登录身份对齐官方 **WorkBuddy 桌面端**（证据：magpie 的
+	// @magpie-community/opencode-workbuddy-auth 0.2.37 SITES.workbuddy —
+	// app=5.9.3 / platform=workbuddy / UA="WorkBuddy/"+app）。
+	//
+	// 旧实现用 CodeBuddy CLI 身份（UA "CLI/2.63.2 CodeBuddy/2.63.2" +
+	// platform=CLI），实测被抓到另一条登录链路：
+	//
+	//	platform=workbuddy + UA 以 WorkBuddy/ 开头 → https://www.workbuddy.cn/login （WorkBuddy 桌面登录页）
+	//	platform=CLI      或 UA 为 CLI/CodeBuddy 形态 → https://copilot.tencent.com/login （CodeBuddy CLI 页）
+	//
+	// 即用户在面板里点「登录」被送到 CodeBuddy 的页面，拿回来的 state 也不属于
+	// WorkBuddy 桌面身份 → 后续 token/account 阶段被上游拒。改用桌面端身份后
+	// authUrl 落到 workbuddy.cn，与 magpie 的可用链路一致。
+	clientAppVersion = "5.9.3"
+	clientUA         = "WorkBuddy/" + clientAppVersion
+	platformCN       = "workbuddy"
+	platformGlobal   = "workbuddy-ai"
 )
 
-// loginEndpoints 按 realm 返回设备授权三端点（auth/state、token、account）+ Origin。
-// realm=="global" → 国际版（workbuddy.ai 同域）；cn/非法/缺省 → CN（零回归）。
+// loginEndpoints 按 realm 返回设备授权三端点（auth/state、token、account）+ 品牌 Origin。
+// realm=="global" → 国际版（workbuddy.ai 同域 + workbuddy-ai 平台段）；
+// cn/非法/缺省 → CN（workbuddy 平台段，零回归兜底）。
 func loginEndpoints(realm string) (state, token, account, origin string) {
 	if realm == "global" {
 		base := upstreamBaseGlobal
-		return base + "/v2/plugin/auth/state?platform=CLI",
+		return base + "/v2/plugin/auth/state?platform=" + platformGlobal,
 			base + "/v2/plugin/auth/token?state=",
 			base + "/v2/plugin/login/account?state=",
 			originRefererGlobal
 	}
 	base := upstreamBaseCN
-	return base + "/v2/plugin/auth/state?platform=CLI",
+	return base + "/v2/plugin/auth/state?platform=" + platformCN,
 		base + "/v2/plugin/auth/token?state=",
 		base + "/v2/plugin/login/account?state=",
 		originRefererCN
 }
 
+// platformFor 返回该 realm 对应的上游 platform 段（日志/头共用）。
+func platformFor(realm string) string {
+	if realm == "global" {
+		return platformGlobal
+	}
+	return platformCN
+}
+
 // loginHTTP 设备授权专用 client：短超时、无 cookie（每请求携带 state，无会话态）。
 var loginHTTP = &http.Client{Timeout: 30 * time.Second}
 
-func commonHeaders(req *http.Request, origin string) {
+// commonHeaders 只发官方桌面端那三个头。
+//
+// 设备授权的三个端点都不是浏览器发起的请求：官方客户端不发 Origin/Referer/
+// X-Requested-With（magpie 同样只发 Content-Type/Accept/User-Agent）。旧实现
+// 补了 Origin: https://www.codebuddy.cn + X-Requested-With，等于把请求标成
+// 「CodeBuddy 网页端」，与桌面端身份自相矛盾。
+func commonHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("Origin", origin)
-	req.Header.Set("Referer", origin+"/")
 	req.Header.Set("User-Agent", clientUA)
 }
+
+// loginNoIdentityHeaders 是 state 阶段的三段式「别替我注入身份」声明
+//（官方桌面端与 magpie 同款）：拿 state 时还没有账号，带上身份头只会让上游
+// 按别的产品线派活。
+var loginNoIdentityHeaders = map[string]string{
+	"X-No-Authorization":   "true",
+	"X-No-User-Id":         "true",
+	"X-No-Enterprise-Id":   "true",
+	"X-No-Department-Info": "true",
+}
+
+// loginAccountHeaders 是 account 阶段的头：X-No-Authorization 会让 Bearer 失效，
+// 所以只在 state 阶段发；X-No-User-Id / X-No-Enterprise-Id 需与官方一致发出，
+// X-Domain 指明令牌所属域（官方取 token.domain，缺省用端点 host）。
+func loginAccountHeaders(domain string) map[string]string {
+	h := map[string]string{"X-No-User-Id": "true", "X-No-Enterprise-Id": "true"}
+	if domain != "" {
+		h["X-Domain"] = domain
+	}
+	return h
+}
+
+// loginSessionID 生成 authUrl 的 loginSessionId（官方桌面端为 32 位 hex）。
+// CN 登录页会据此建立浏览器侧会话，缺失时企业微信登录入口不出现。
+func loginSessionID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// loginAuthURL 给上游返回的授权页补官方参数：version（页面按它决定展示哪些
+// 登录方式，CN 版对 version<5.8.0 隐藏企业微信登录）与 loginSessionId。
+func loginAuthURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		return "", errInvalidAuthURL
+	}
+	q := u.Query()
+	q.Set("version", clientAppVersion)
+	q.Set("loginSessionId", loginSessionID())
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+var errInvalidAuthURL = errors.New("invalid auth url")
 
 // validUID 校验上游返回的 uid 是否可安全用于拼文件名。
 // 只放行字母、数字、下划线、连字符（腾讯侧 uid 实测为 UUID 形态），
@@ -108,20 +190,42 @@ const (
 	loginStageAccount = "account"
 	loginMaxTransient = 5
 	loginMaxRetryWait = 60
+
+	// 上游「登录还没完成」的业务码（证据：magpie 的 poll() 重试码表）。
+	// token 阶段 11217、account 阶段 12151，官方的 msg 是 "login ing..." 之类
+	// 不稳定文案，判定必须以业务码为准。
+	loginPendingCodeToken   = 11217
+	loginPendingCodeAccount = 12151
 )
 
-// Only token GET may interpret pending responses. The prefixed CN response was
-// observed with HTTP 200/code 11217; never turn arbitrary 11217 failures into a wait.
-func loginTokenPending(stage string, env apiEnvelope) bool {
-	if stage != loginStageToken {
+// loginPending 判断一次业务错误是不是「用户还没在浏览器里完成授权」。
+//
+// 线上真实响应是 HTTP 200 + {"code":11217,"msg":"login ing..."}（未登录时每
+// 3s 都这么回）。旧实现用 msg 白名单匹配（"login ing" 等，不带省略号），真实
+// 文案带三个点 → 不匹配 → 被归成 category=business → 前端 app.js 把它翻成
+// 「上游拒绝授权」。于是用户刚点登录、甚至还没看清授权页，面板就报失败。
+//
+// 现在按码判定（与 magpie 一致），msg 只作为老响应形态的兜底。
+func loginPending(stage string, env apiEnvelope) bool {
+	switch stage {
+	case loginStageToken:
+		if env.Code == loginPendingCodeToken {
+			return true
+		}
+	case loginStageAccount:
+		if env.Code == loginPendingCodeAccount {
+			return true
+		}
 		return false
 	}
-	msg := strings.ToLower(strings.TrimSpace(env.Msg))
-	switch msg {
-	case "login ing", "pending", "waiting for login", "login pending":
-		return true // Preserve the existing token polling vocabulary.
+	// 兼容历史形态：token 阶段的既有「还没登录」文案（含曾经的自述式 msg）
+	// 即使码不是 11217 也只算等待 —— 这些文案本来就只出现在 token 阶段。
+	switch strings.ToLower(strings.TrimSpace(env.Msg)) {
 	case "11217:login ing...":
-		return env.Code == 11217
+		// 自带码的旧响应形态：文案与码必须同时对上，避免 999 之类借文案变等待。
+		return stage == loginStageToken && env.Code == loginPendingCodeToken
+	case "login ing", "login ing...", "pending", "waiting for login", "login pending":
+		return stage == loginStageToken
 	}
 	return false
 }
@@ -173,12 +277,15 @@ func (p *Panel) loginEP(realm string) (string, string, string, string) {
 	return loginEndpoints(realm)
 }
 
-func (p *Panel) loginJSON(ctx context.Context, h *egress.RouteHandle, method, fullURL, bearer string, body io.Reader, origin, stage string) (json.RawMessage, error) {
+func (p *Panel) loginJSON(ctx context.Context, h *egress.RouteHandle, method, fullURL, bearer string, extra map[string]string, body io.Reader, stage string) (json.RawMessage, error) {
 	req, err := http.NewRequestWithContext(ctx, method, fullURL, body)
 	if err != nil {
 		return nil, &loginUpstreamError{stage: stage, category: "request"}
 	}
-	commonHeaders(req, origin)
+	commonHeaders(req)
+	for k, v := range extra {
+		req.Header.Set(k, v)
+	}
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
@@ -228,7 +335,7 @@ func (p *Panel) loginJSON(ctx context.Context, h *egress.RouteHandle, method, fu
 		return nil, &loginUpstreamError{stage: stage, category: "response", status: resp.StatusCode}
 	}
 	if env.Code != 0 {
-		return nil, &loginUpstreamError{stage: stage, category: "business", status: resp.StatusCode, code: env.Code, pending: loginTokenPending(stage, env)}
+		return nil, &loginUpstreamError{stage: stage, category: "business", status: resp.StatusCode, code: env.Code, pending: loginPending(stage, env)}
 	}
 	return env.Data, nil
 }
@@ -279,8 +386,8 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 			h.Release()
 		}
 	}()
-	ep, _, _, origin := p.loginEP(realm)
-	data, err := p.loginJSON(r.Context(), h, http.MethodPost, ep, "", bytes.NewReader([]byte("{}")), origin, loginStageState)
+	ep, _, _, _ := p.loginEP(realm)
+	data, err := p.loginJSON(r.Context(), h, http.MethodPost, ep, "", loginNoIdentityHeaders, bytes.NewReader([]byte("{}")), loginStageState)
 	if err != nil {
 		p.loginFailure(w, err)
 		return
@@ -293,11 +400,12 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 		proxyError(w, 502, "oauth_state_failed")
 		return
 	}
-	u, err := url.Parse(st.AuthURL)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+	authURL, err := loginAuthURL(st.AuthURL)
+	if err != nil {
 		proxyError(w, 502, "oauth_url_failed")
 		return
 	}
+	st.AuthURL = authURL
 	ctx, cancel := context.WithTimeout(context.Background(), loginTTL)
 	sess := &loginSession{created: time.Now(), realm: realm, ctx: ctx, cancel: cancel, route: h, confirmRebind: in.Confirm}
 	if h != nil {
@@ -325,7 +433,7 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 	p.logins[st.State] = sess
 	p.loginMu.Unlock()
 	keep = true
-	log.Printf("panel: OAuth started realm=%s", realm)
+	log.Printf("panel: OAuth started realm=%s platform=%s app=%s", realm, platformFor(realm), clientAppVersion)
 	writeJSON(w, 200, map[string]any{"ok": true, "url": st.AuthURL, "state": st.State, "realm": realm, "proxy_slot_id": in.SlotID})
 }
 
@@ -391,7 +499,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	_, epToken, epAcct, origin := p.loginEP(sess.realm)
+	_, epToken, epAcct, _ := p.loginEP(sess.realm)
 	if sess.credentials == nil {
 		if time.Now().Before(sess.nextPollAt) {
 			retry := int(math.Ceil(time.Until(sess.nextPollAt).Seconds()))
@@ -399,7 +507,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 200, map[string]any{"done": false, "message": "upstream_retry_wait", "retry_after": retry, "stage": loginStageToken, "category": "retry_wait"})
 			return
 		}
-		raw, err := p.loginJSON(ctx, sess.route, http.MethodGet, epToken+url.QueryEscape(state), "", nil, origin, loginStageToken)
+		raw, err := p.loginJSON(ctx, sess.route, http.MethodGet, epToken+url.QueryEscape(state), "", nil, nil, loginStageToken)
 		if err != nil {
 			var oe *loginUpstreamError
 			if errors.As(err, &oe) && oe.pending {
@@ -456,8 +564,25 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 			proxyError(w, 502, "oauth_token_failed")
 			return
 		}
-		raw, err = p.loginJSON(ctx, sess.route, http.MethodGet, epAcct+url.QueryEscape(state), tok.AccessToken, nil, origin, loginStageAccount)
+		// X-Domain：官方取 token.domain，缺省用 account 端点 host（与 magpie 同）。
+		domain := strings.TrimSpace(tok.Domain)
+		if domain == "" {
+			if u, uerr := url.Parse(epAcct); uerr == nil {
+				domain = u.Host
+			}
+		}
+		raw, err = p.loginJSON(ctx, sess.route, http.MethodGet, epAcct+url.QueryEscape(state), tok.AccessToken, loginAccountHeaders(domain), nil, loginStageAccount)
 		if err != nil {
+			var oe *loginUpstreamError
+			// state 已授权、令牌也拿到了，但账号信息还没落定（12151）→ 继续等，
+			// 不能把会话判死（旧实现直接 terminal，用户只能重来一遍授权）。
+			if errors.As(err, &oe) && oe.pending {
+				sess.transientFailures, sess.nextPollAt = 0, time.Time{}
+				d := loginDiagnostic(oe)
+				d["done"], d["message"], d["retry_after"] = false, "waiting_for_login", 3
+				writeJSON(w, 200, d)
+				return
+			}
 			terminal("oauth_terminal_error")
 			p.loginFailure(w, err)
 			return

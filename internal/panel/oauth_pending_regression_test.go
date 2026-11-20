@@ -85,13 +85,15 @@ func TestOAuthCNExplicitDirectPending11217KeepsSession(t *testing.T) {
 }
 
 type oauthPendingFixture struct {
-	panel   *Panel
-	manager *egress.Manager
-	mu      sync.Mutex
-	calls   map[string]int
-	status  map[string]int
-	bodies  map[string]string
-	retry   string
+	panel    *Panel
+	manager  *egress.Manager
+	mu       sync.Mutex
+	calls    map[string]int
+	status   map[string]int
+	bodies   map[string]string
+	retry    string
+	headers  map[string]http.Header
+	rawQuery map[string]string
 }
 
 func newOAuthPendingFixture(t *testing.T) *oauthPendingFixture {
@@ -102,11 +104,14 @@ func newOAuthPendingFixture(t *testing.T) *oauthPendingFixture {
 			"/token":   `{"code":0,"data":{"accessToken":"private-fixture-token","refreshToken":"private-fixture-refresh","expiresIn":3600}}`,
 			"/account": `{"code":0,"data":{"uid":"oauth-fixture-uid","nickname":"synthetic"}}`,
 		},
+		headers: map[string]http.Header{}, rawQuery: map[string]string{},
 	}
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.calls[r.URL.Path]++
+		f.headers[r.URL.Path] = r.Header.Clone()
+		f.rawQuery[r.URL.Path] = r.URL.RawQuery
 		w.Header().Set("Content-Type", "application/json")
 		if f.retry != "" {
 			w.Header().Set("Retry-After", f.retry)
@@ -168,7 +173,6 @@ func TestOAuthPendingIsSpecificToTokenStageAndKnownResponse(t *testing.T) {
 		{"account", "/account", `{"code":11217,"msg":"11217:login ing..."}`},
 		{"legacy-account", "/account", `{"code":1,"msg":"pending"}`},
 		{"unknown-code", "/token", `{"code":999,"msg":"11217:login ing..."}`},
-		{"same-code-rejected", "/token", `{"code":11217,"msg":"account access restricted"}`},
 		{"unknown-error", "/token", `{"code":999,"msg":"private-fixture-token sensitive-fixture-state https://browser.fixture.invalid/private"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

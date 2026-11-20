@@ -2,16 +2,21 @@
 //
 // 两个子命令，由 login.sh 顺序驱动：
 //
-//	login [--realm=cn|global] url   → POST /v2/plugin/auth/state?platform=CLI 拿 state+authUrl，
+//	login [--realm=cn|global] url   → POST /v2/plugin/auth/state?platform=workbuddy 拿 state+authUrl，
 //	                                  state 落 /tmp/wb2api-login-state.json，stdout 打印授权 URL
 //	login [--realm=cn|global] poll  → 读 state，GET /v2/plugin/auth/token?state= 一次，
 //	                                  成功再 GET /v2/plugin/login/account?state= 拿 uid/nickname，
 //	                                  stdout 打印完整 token+account JSON（含 realm 键）
 //
-// --realm 默认 cn。按 realm 切换上游端点与 Origin/Referer：
+// --realm 默认 cn。按 realm 切换上游端点与平台段：
 //
-//	cn     → https://copilot.tencent.com（Origin: https://www.codebuddy.cn）
-//	global → https://www.workbuddy.ai（Origin: https://www.workbuddy.ai）
+//	cn     → https://copilot.tencent.com（platform=workbuddy）
+//	global → https://www.workbuddy.ai（platform=workbuddy-ai）
+//
+// 身份对齐官方 **WorkBuddy 桌面端**（UA "WorkBuddy/5.9.3"，与 magpie 的
+// opencode-workbuddy-auth 一致）：platform + UA 共同决定 authUrl 落到哪个登录页，
+// CodeBuddy CLI 形态会被派到 copilot.tencent.com/login，拿到的 state 不属于
+// WorkBuddy 桌面身份，后续阶段被上游拒。
 //
 // state 落盘带 realm，poll 读回校验与命令行 --realm 一致（防混域）。
 // 无 PKCE（workbuddy 设备流由服务端签发 state）。
@@ -20,28 +25,68 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	auth2 "github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
 
-// 上游常量：CN → copilot.tencent.com（Origin 为 codebuddy.cn）；global → www.workbuddy.ai
-// （base 与 Origin/Referer 同域）。端点 URL 由 realmConfig 按 realm 动态拼出，不再硬编码。
+// 上游常量：CN → copilot.tencent.com；global → www.workbuddy.ai。端点 URL 由
+// realmConfig 按 realm 动态拼出，平台段由 platformFor 给出（桌面端身份）。
 const (
 	upstreamBaseCN      = "https://copilot.tencent.com"
 	upstreamBaseGlobal  = "https://www.workbuddy.ai"
-	clientUA            = "CLI/2.63.2 CodeBuddy/2.63.2"
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
+
+	// 与面板登录（internal/panel/panel login.go）同一套桌面端身份。
+	clientAppVersion = "5.9.3"
+	clientUA         = "WorkBuddy/" + clientAppVersion
+	platformCN       = "workbuddy"
+	platformGlobal   = "workbuddy-ai"
 )
+
+// platformFor 返回该 realm 的上游 platform 段。
+func platformFor(realm string) string {
+	if realm == realmGlobal {
+		return platformGlobal
+	}
+	return platformCN
+}
+
+// loginSessionID 生成 authUrl 的 loginSessionId（官方桌面端为 32 位 hex）。
+func loginSessionID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// decorateAuthURL 给上游授权页补 version（登录页据此决定展示哪些登录方式）
+// 与 loginSessionId（浏览器侧会话，缺失时 CN 页不出现企业微信登录）。
+func decorateAuthURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		return "", fmt.Errorf("invalid auth url")
+	}
+	q := u.Query()
+	q.Set("version", clientAppVersion)
+	q.Set("loginSessionId", loginSessionID())
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
 
 // 登录 state 落盘路径（var 便于测试替换临时文件）
 // Portable across OSes: the upstream hardcoded "/tmp/...", which on
@@ -61,16 +106,36 @@ func realmConfig(realm string) (base, origin string) {
 	return upstreamBaseCN, originRefererCN
 }
 
-// commonHeaders 按 origin 设置通用请求头（Origin/Referer 随 realm 变化）。
-// 返回 func(*http.Request)，由调用方按 realm 选定的 origin 构造一次后复用。
-func commonHeaders(origin string) func(*http.Request) {
+// commonHeaders 返回通用请求头构造函数：官方桌面端只发 Content-Type/Accept/
+// User-Agent，不发 Origin/Referer/X-Requested-With（设备授权不是浏览器请求）。
+func commonHeaders() func(*http.Request) {
 	return func(req *http.Request) {
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/plain, */*")
-		req.Header.Set("X-Requested-With", "XMLHttpRequest")
-		req.Header.Set("Origin", origin)
-		req.Header.Set("Referer", origin+"/")
 		req.Header.Set("User-Agent", clientUA)
+	}
+}
+
+// noIdentityHeaders state 阶段的「别替我注入身份」声明（官方桌面端同款）。
+func noIdentityHeaders(req *http.Request) {
+	commonHeaders()(req)
+	req.Header.Set("X-No-Authorization", "true")
+	req.Header.Set("X-No-User-Id", "true")
+	req.Header.Set("X-No-Enterprise-Id", "true")
+	req.Header.Set("X-No-Department-Info", "true")
+}
+
+// accountHeaders account 阶段的头：Bearer + 归属声明 + X-Domain。
+// X-No-Authorization 会让 Bearer 失效，所以只在 state 阶段发。
+func accountHeaders(token, domain string) func(*http.Request) {
+	return func(req *http.Request) {
+		commonHeaders()(req)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-No-User-Id", "true")
+		req.Header.Set("X-No-Enterprise-Id", "true")
+		if domain != "" {
+			req.Header.Set("X-Domain", domain)
+		}
 	}
 }
 
@@ -90,8 +155,8 @@ func doJSON(client *http.Client, method, fullURL string, headers func(*http.Requ
 	if headers != nil {
 		headers(req)
 	} else {
-		// 缺省头：CN origin（与原 commonHeaders() 行为一致，零回归）
-		commonHeaders(originRefererCN)(req)
+		// 缺省头：桌面端身份（与 state/token/account 三处共用同一套）
+		commonHeaders()(req)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -206,8 +271,8 @@ func validateRealmMatch(stateRealm, cliRealm string) error {
 // state 落盘（带 realm），stdout 打印 authURL。out 接 stdout；stateFile 为落盘路径
 // （可注入临时文件便于测试）。空 realm 视为缺省（调用方已归一）。
 func runURL(base, origin, realm, statePath string, client *http.Client, out io.Writer) {
-	headers := commonHeaders(origin)
-	data, _, err := doJSON(client, http.MethodPost, base+"/v2/plugin/auth/state?platform=CLI", headers, bytes.NewReader([]byte("{}")))
+	_ = origin // 设备授权不发 Origin/Referer（保留入参以兼容既有调用/测试）
+	data, _, err := doJSON(client, http.MethodPost, base+"/v2/plugin/auth/state?platform="+platformFor(realm), noIdentityHeaders, bytes.NewReader([]byte("{}")))
 	if err != nil {
 		fatal("auth state failed: %v", err)
 	}
@@ -218,6 +283,12 @@ func runURL(base, origin, realm, statePath string, client *http.Client, out io.W
 	if err := json.Unmarshal(data, &st); err != nil || st.State == "" || st.AuthURL == "" {
 		fatal("auth state: missing state or authUrl")
 	}
+	// 补 version + loginSessionId：CN 登录页按 version 决定展示哪些登录方式。
+	authURL, err := decorateAuthURL(st.AuthURL)
+	if err != nil {
+		fatal("auth url: %v", err)
+	}
+	st.AuthURL = authURL
 	raw, _ := json.Marshal(loginState{State: st.State, Realm: realm})
 	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
 		fatal("write state: %v", err)
@@ -241,10 +312,10 @@ func runPoll(base, origin, realm, statePath string, client *http.Client, out io.
 	if err := validateRealmMatch(ls.Realm, realm); err != nil {
 		fatal("%v", err)
 	}
-	headers := commonHeaders(origin)
+	_ = origin // 设备授权不发 Origin/Referer（保留入参以兼容既有调用/测试）
 	// handlePollLogin (oauth.go:108-162)：auth/token 是权威登录状态端点，
-	// pending 时业务 code 非 0（"login ing"），完成时 code=0 + token bundle
-	tokRaw, status, errTok := doJSON(client, http.MethodGet, base+"/v2/plugin/auth/token?state="+ls.State, headers, nil)
+	// pending 时业务 code 非 0（真实 CN 形态：11217 + "login ing..."），完成时 code=0 + token bundle
+	tokRaw, status, errTok := doJSON(client, http.MethodGet, base+"/v2/plugin/auth/token?state="+ls.State, commonHeaders(), nil)
 	if errTok != nil {
 		if status == 0 || status >= 500 {
 			fatal("token endpoint error: %v", errTok)
@@ -260,17 +331,19 @@ func runPoll(base, origin, realm, statePath string, client *http.Client, out io.
 	if err := json.Unmarshal(tokRaw, &tok); err != nil || tok.AccessToken == "" {
 		fatal("登录未完成（waiting for login）。请确认已在浏览器完成登录再按 y")
 	}
-	// login/account 拿 uid/nickname（带 Bearer）
+	// login/account 拿 uid/nickname（带 Bearer + 归属声明 + X-Domain）
 	var acct struct {
 		UID          string `json:"uid"`
 		EnterpriseID string `json:"enterpriseId"`
 		Nickname     string `json:"nickname"`
 	}
-	acctHeaders := func(r *http.Request) {
-		headers(r)
-		r.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	domain := strings.TrimSpace(tok.Domain)
+	if domain == "" {
+		if u, uerr := url.Parse(base); uerr == nil {
+			domain = u.Host
+		}
 	}
-	if acctRaw, _, errAcct := doJSON(client, http.MethodGet, base+"/v2/plugin/login/account?state="+ls.State, acctHeaders, nil); errAcct == nil {
+	if acctRaw, _, errAcct := doJSON(client, http.MethodGet, base+"/v2/plugin/login/account?state="+ls.State, accountHeaders(tok.AccessToken, domain), nil); errAcct == nil {
 		_ = json.Unmarshal(acctRaw, &acct)
 	}
 	oraw, _ := json.Marshal(buildLoginOutput(tok, realm, acct))
